@@ -1,8 +1,9 @@
 """Configuration and project registry management."""
 
+import json
 import sqlite3
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from contextlib import contextmanager
 from platformdirs import user_config_dir, user_data_dir, user_cache_dir
@@ -22,6 +23,12 @@ class Config:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         self.db_path = self.data_dir / "projects.db"
+        self.global_config_file = self.config_dir / "config.json"
+        self.plugins_dir = self.config_dir / "plugins"
+
+        # Ensure plugin directory exists
+        self.plugins_dir.mkdir(parents=True, exist_ok=True)
+
         self._init_db()
 
     @contextmanager
@@ -111,6 +118,36 @@ class Config:
             )
             conn.commit()
             return cursor.rowcount > 0
+
+    def load_global_config(self) -> Dict[str, Any]:
+        """Load global configuration from config.json.
+
+        Returns:
+            Dict with global configuration, or default config if file doesn't exist
+        """
+        if not self.global_config_file.exists():
+            return self._default_global_config()
+
+        try:
+            with open(self.global_config_file, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            # Log warning but return defaults
+            print(f"Warning: Failed to load config from {self.global_config_file}: {e}")
+            return self._default_global_config()
+
+    def save_global_config(self, config_dict: Dict[str, Any]) -> None:
+        """Save global configuration to config.json."""
+        with open(self.global_config_file, 'w') as f:
+            json.dump(config_dict, f, indent=2)
+
+    def _default_global_config(self) -> Dict[str, Any]:
+        """Return default global configuration."""
+        return {
+            "version": "1",
+            "plugins": {},
+            "hooks": {}
+        }
 
 
 # Global config instance

@@ -8,6 +8,21 @@ import click
 from click.shell_completion import CompletionItem
 
 from .config import config
+from .plugins import PluginLoader
+
+
+# Global plugin loader (initialized once)
+_plugin_loader = None
+
+
+def get_plugin_loader() -> PluginLoader:
+    """Get or initialize the global plugin loader."""
+    global _plugin_loader
+    if _plugin_loader is None:
+        global_config = config.load_global_config()
+        _plugin_loader = PluginLoader(global_config)
+        _plugin_loader.load_all(config.plugins_dir)
+    return _plugin_loader
 
 
 def complete_project_names(ctx, param, incomplete):
@@ -152,6 +167,9 @@ def enter(project):
 
     Spawns a new shell session in the project directory. Use 'exit' or Ctrl+D
     to leave the project context and return to your original shell.
+
+    If tmux integration is enabled and you're in a tmux session, creates
+    a split-pane window instead of spawning a subshell.
     """
     # Get project from registry
     project_data = config.get_project(project)
@@ -161,6 +179,13 @@ def enter(project):
         click.echo("Use 'cl9 list' to see available projects.", err=True)
         sys.exit(1)
 
+    # Get plugin loader
+    loader = get_plugin_loader()
+
+    # Run pre_enter hooks (observation only)
+    loader.run_hook('pre_enter', project_data)
+
+    # Validate project
     project_path = Path(project_data['path'])
 
     # Check if directory exists
@@ -178,6 +203,19 @@ def enter(project):
     # Update last accessed timestamp
     config.update_last_accessed(project)
 
+    # Set up cl9 environment variables
+    env = os.environ.copy()
+    env['CL9_PROJECT'] = project
+    env['CL9_PROJECT_PATH'] = str(project_path)
+    env['CL9_ACTIVE'] = '1'
+
+    # Run on_enter hook - plugin may take over (e.g., tmux)
+    if loader.run_hook('on_enter', project_data, env):
+        # Plugin handled enter (e.g., created tmux window)
+        # Don't spawn subshell, just exit
+        return
+
+    # Default behavior: spawn subshell
     click.echo(f"Entering project: {project}")
     click.echo(f"Location: {project_path}")
     click.echo(f"Type 'exit' or press Ctrl+D to leave project context")
@@ -186,16 +224,10 @@ def enter(project):
     # Change to project directory
     os.chdir(project_path)
 
-    # Set up cl9 environment variables
-    env = os.environ.copy()
-    env['CL9_PROJECT'] = project
-    env['CL9_PROJECT_PATH'] = str(project_path)
-    env['CL9_ACTIVE'] = '1'
-
     # Get shell from environment, fallback to /bin/sh
     shell = env.get('SHELL', '/bin/sh')
 
-    # Spawn subshell
+    # Spawn subshell (this replaces current process)
     os.execvpe(shell, [shell], env)
 
 
@@ -216,7 +248,18 @@ def agent():
         click.echo("Use 'cl9 init' to initialize a project, or 'cl9 enter <project>' to enter one.", err=True)
         sys.exit(1)
 
-    # Execute claude --continue
+    # Get plugin loader
+    loader = get_plugin_loader()
+
+    # Run pre_agent hooks
+    loader.run_hook('pre_agent', current_dir)
+
+    # Run on_agent hook - plugin may take over
+    if loader.run_hook('on_agent', current_dir):
+        # Plugin handled agent launch
+        return
+
+    # Default behavior: Execute claude --continue
     # Using os.execvp to replace the current process
     os.execvp("claude", ["claude", "--continue"])
 
