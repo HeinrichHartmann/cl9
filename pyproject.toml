@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cl9"
+version = "0.1.0"
+description = "Opinionated LLM session manager - context switching for AI-assisted work"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Heinrich Hartmann", email = "heinrich.hartmann@gmail.com"}
+]
+dependencies = [
+    "click>=8.0",
+    "platformdirs>=3.0",
+]
+
+[project.scripts]
+cl9 = "cl9.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/HeinrichHartmann/cl9"
+Repository = "https://github.com/HeinrichHartmann/cl9"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cl9"]

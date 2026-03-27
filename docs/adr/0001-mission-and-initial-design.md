@@ -22,13 +22,38 @@ A project is the context in which an agent or human operates. Everything importa
 **Usage-Based Exploration**
 We are not doing large design up front. Features emerge from usage patterns and real needs.
 
+## Terminology
+
+**Agent:** An LLM tool instance - Claude Code, GitHub Copilot CLI, Codex, or any AI assistant running inside a CLI harness. Multiple agents can operate within a single project context, each maintaining their own session data and environment state.
+
 ## Decision
 
 Build `cl9` as a Python CLI tool with the following initial design:
 
 ### Core Commands (MVP)
 - `cl9 init` - Register/initialize a cl9 project in current directory
-- `cl9 enter <project>` - Enter a project context and launch LLM session
+- `cl9 list` - List all registered projects (supports --format for json/tsv output)
+- `cl9 remove <project>` - Remove project from registry (doesn't delete files)
+- `cl9 enter <project>` - Spawn subshell in project directory with cl9 environment
+- `cl9 agent` - Launch LLM agent in current project directory
+
+### Workflow
+
+The workflow separates context switching from agent launching:
+
+1. **Enter project context**: `cl9 enter <project>` spawns a subshell in the project directory
+   - Sets environment variables (CL9_PROJECT, CL9_PROJECT_PATH, CL9_ACTIVE)
+   - Uses $SHELL for shell-agnostic operation
+   - User can work in project, run commands, modify files
+2. **Launch agent**: `cl9 agent` starts LLM agent in current project
+   - Must be run from within a cl9 project directory
+   - Can be run multiple times (multiple agents per project)
+3. **Exit context**: `exit` or Ctrl+D returns to original shell
+
+This design allows:
+- Working in project without launching agent
+- Multiple agent sessions within same project
+- Natural shell-based workflow
 
 ### State Management
 
@@ -53,8 +78,9 @@ Build `cl9` as a Python CLI tool with the following initial design:
 ### Technology Choices
 - **Language**: Python (ubiquitous, good CLI libraries, rapid iteration)
 - **Distribution**: GitHub repository, installable via `uv tool install`
-- **CLI Framework**: Click or Typer (decision deferred)
+- **CLI Framework**: Click (simple, widely used)
 - **Package Structure**: Standard Python package with pyproject.toml
+- **Registry Storage**: SQLite with WAL mode (safe concurrent access)
 
 ### Installation Method
 ```bash
