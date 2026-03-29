@@ -8,7 +8,11 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from ..loader import PluginLoadError
+
+# Define PluginLoadError locally to avoid import issues with dynamic loading
+class PluginLoadError(Exception):
+    """Raised when a plugin fails to load."""
+    pass
 
 
 # Plugin metadata
