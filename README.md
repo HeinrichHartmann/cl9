@@ -7,11 +7,21 @@ Projects are self-contained workspaces where everything relevant to a context li
 ## Installation
 
 ```bash
+# From this checkout
+make install
+
 # Local development install
-uv tool install ~/p-workbench/src/cl9
+uv tool install --force --reinstall ~/p-workbench/src/cl9
 
 # From GitHub
 uv tool install git+https://github.com/username/cl9
+```
+
+## Development
+
+```bash
+# Run the CLI test suite
+make test
 ```
 
 ## Shell Completion
@@ -41,10 +51,10 @@ Completions provide:
 ## Synopsis
 
 ```
-cl9 init [<project-name>]
+cl9 init [<path>] [-n|--name <name>]
 cl9 list [-f|--format <format>]
 cl9 remove <project>
-cl9 enter <project>
+cl9 enter <target> [-n|--name] [-p|--path]
 cl9 agent
 cl9 env <shell>
 ```
@@ -53,18 +63,18 @@ cl9 env <shell>
 
 ### cl9 init
 
-Initialize a cl9 project in the current directory.
+Initialize a cl9 project in a directory.
 
 **Usage:**
 ```
-cl9 init [<project-name>]
+cl9 init [<path>] [-n|--name <name>]
 ```
 
 **Description:**
 
-Registers the current directory as a cl9 project. Creates a `.cl9/` subdirectory for project-local state and adds the project to the global registry.
+Registers a directory as a cl9 project. Creates a `.cl9/` subdirectory for project-local state and adds the project to the global registry.
 
-If `<project-name>` is provided, the project is registered with that name. Otherwise, the directory name is used.
+If `<path>` is omitted, the current directory is used. If `--name` is not provided, the project name is derived from the directory name.
 
 **Files Created:**
 - `.cl9/` - Project-local state directory
@@ -78,13 +88,16 @@ If `<project-name>` is provided, the project is registered with that name. Other
 
 **Examples:**
 ```bash
-# Initialize project with directory name
+# Initialize the current directory with its directory name
 cd ~/work/my-app
 cl9 init
+cl9 init .
 
-# Initialize with explicit name
-cd ~/repos/complicated-project-name
-cl9 init myapp
+# Initialize another directory, deriving the name from the path
+cl9 init ~/projects/foo
+
+# Initialize with an explicit name
+cl9 init ~/repos/complicated-project-name --name myapp
 ```
 
 ---
@@ -168,7 +181,7 @@ Enter a project context by spawning a subshell in its directory.
 
 **Usage:**
 ```
-cl9 enter <project>
+cl9 enter <target> [-n|--name] [-p|--path]
 ```
 
 **Description:**
@@ -177,29 +190,37 @@ Enters a project by spawning a new shell session in the project's directory. Thi
 
 Use `exit` or press Ctrl+D to leave the project context and return to your original shell.
 
+`<target>` is resolved as a registry name first, then as a filesystem path containing `.cl9/`, unless a flag forces one mode.
+
 **Arguments:**
-- `<project>` - Name of the registered project to enter
+- `<target>` - Project name or filesystem path
+
+**Options:**
+- `-n, --name` - Force registry-name lookup
+- `-p, --path` - Force filesystem-path lookup
 
 **Behavior:**
-- Validates project exists in registry
+- Resolves `<target>` as a registry name or filesystem path
 - Checks project directory and `.cl9/` subdirectory exist
 - Updates last accessed timestamp
 - Changes to project directory
 - Spawns a new shell using `$SHELL` (shell-agnostic)
 - Sets environment variables:
-  - `CL9_PROJECT` - Project name
+  - `CL9_PROJECT` - Project name from the registry or local `.cl9/config.json`
   - `CL9_PROJECT_PATH` - Full path to project
   - `CL9_ACTIVE=1` - Indicates active cl9 context
 
 **Examples:**
 ```bash
-# Enter a project
+# Enter a registered project by name
 cl9 enter myapp
-# Now in a subshell, in the project directory
-# Work on your project...
-cl9 agent  # Launch an agent
-# When done:
-exit  # Or Ctrl+D to leave project context
+
+# Enter an initialized directory by path, even if it is not registered
+cl9 enter ~/projects/foo
+
+# Force a specific interpretation
+cl9 enter --name myapp
+cl9 enter --path ./some-dir
 ```
 
 ---
@@ -226,13 +247,13 @@ This command starts or resumes a Claude Code session using `claude --continue`.
 **Examples:**
 ```bash
 # Typical workflow
-cl9 enter myapp      # Enter project (spawns subshell)
+cl9 enter myapp      # Enter project by name (spawns subshell)
 cl9 agent            # Launch agent in project
 # Work with the agent...
 exit                 # Leave project context
 
 # Quick session
-cl9 enter myapp && cl9 agent
+cl9 enter ~/work/myapp && cl9 agent
 ```
 
 ---

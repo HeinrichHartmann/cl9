@@ -38,7 +38,7 @@ Implement tmux integration as a **built-in plugin** that ships with cl9.
 1. Plugin loads successfully (tmux executable found on PATH)
 2. User is currently in a tmux session (`$TMUX` env var exists)
 
-**Behavior on `cl9 enter <project>`**:
+**Behavior on `cl9 enter <target>`**:
 
 1. **Check for existing window**:
    - Look for window named `cl9:{project_name}` in current session

@@ -73,7 +73,7 @@ def post_enter(project_data: dict, config: dict) -> None:
 ### Hook Lifecycle
 
 ```
-cl9 enter <project>
+cl9 enter <target>
   ↓
 load plugins (if not loaded)
   ↓
