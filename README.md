@@ -22,6 +22,9 @@ uv tool install git+https://github.com/username/cl9
 ```bash
 # Run the CLI test suite
 make test
+
+# Run lint checks
+make lint
 ```
 
 ## Shell Completion
@@ -51,12 +54,14 @@ Completions provide:
 ## Synopsis
 
 ```
-cl9 init [<path>] [-n|--name <name>]
+cl9 init [<path>] [-n|--name <name>] [-t|--type <type>]
 cl9 list [-f|--format <format>]
 cl9 remove <project>
 cl9 enter <target> [-n|--name] [-p|--path]
 cl9 agent
-cl9 env <shell>
+cl9 env init [<path>] [-n|--name <name>] [-t|--type <type>]
+cl9 env update [--diff] [--force]
+cl9 env <bash|zsh|fish>
 ```
 
 ## Commands
@@ -67,20 +72,27 @@ Initialize a cl9 project in a directory.
 
 **Usage:**
 ```
-cl9 init [<path>] [-n|--name <name>]
+cl9 init [<path>] [-n|--name <name>] [-t|--type <type>]
 ```
 
 **Description:**
 
-Registers a directory as a cl9 project. Creates a `.cl9/` subdirectory for project-local state and adds the project to the global registry.
+Registers a directory as a cl9 project. Creates a `.cl9/` subdirectory for project-local state, applies an environment template, and adds the project to the global registry.
 
-If `<path>` is omitted, the current directory is used. If `--name` is not provided, the project name is derived from the directory name.
+If `<path>` is omitted, the current directory is used. If `--name` is not provided, the project name is derived from the directory name. If `--type` is not provided, cl9 uses the configured default environment type, or `default`.
+
+If any generated file or directory already exists in the target location, initialization fails before writing and asks you to move the conflicting paths out of the way.
+
+**Options:**
+- `-n, --name <name>` - Explicit project name
+- `-t, --type <type>` - Environment type to apply (`default` or `minimal`, plus user/local templates)
 
 **Files Created:**
 - `.cl9/` - Project-local state directory
   - Configuration
-  - Session data
-  - Agent environments
+  - `env/state.json` tracking delivered environment files
+- `src/`, `doc/`, `data/` - Created by the `default` environment type
+- `README.md`, `MEMORY.md`, `flake.nix`, `.envrc` - Created by the `default` environment type
 
 **Global State:**
 - Project added to registry in XDG config directory
@@ -98,6 +110,9 @@ cl9 init ~/projects/foo
 
 # Initialize with an explicit name
 cl9 init ~/repos/complicated-project-name --name myapp
+
+# Initialize a minimal project
+cl9 init ~/tmp/scratch --type minimal
 ```
 
 ---
@@ -260,27 +275,34 @@ cl9 enter ~/work/myapp && cl9 agent
 
 ### cl9 env
 
-Output shell completion script for the specified shell.
+Environment management and shell integration commands.
 
 **Usage:**
 ```
-cl9 env <shell>
+cl9 env init [<path>] [-n|--name <name>] [-t|--type <type>]
+cl9 env update [--diff] [--force]
+cl9 env <bash|zsh|fish>
 ```
 
 **Description:**
 
-Generates shell-specific completion scripts for cl9. The output should be sourced in your shell configuration file to enable tab completion.
+`cl9 env init` is an alias for `cl9 init`.
 
-**Arguments:**
-- `<shell>` - Shell type: `bash`, `zsh`, or `fish`
+`cl9 env update` reapplies the tracked environment template for the current project. It updates unchanged files, re-adds missing tracked files, skips user-modified files by default, and supports `--diff` and `--force`.
 
-**Features:**
-- Tab completion for project names in `cl9 enter` and `cl9 remove`
-- Command name completion
-- Option and flag completion
+`cl9 env bash`, `cl9 env zsh`, and `cl9 env fish` output shell completion scripts.
 
 **Examples:**
 ```bash
+# Alias for init
+cl9 env init ~/work/my-app --type default
+
+# Preview environment changes without writing
+cl9 env update --diff
+
+# Overwrite modified tracked files
+cl9 env update --force
+
 # Zsh - add to ~/.zshrc
 source <(cl9 env zsh)
 

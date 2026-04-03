@@ -43,11 +43,8 @@ cl9 ships with a `default` environment type designed for Nix+direnv workflows:
 ```
 default/
 ├── src/                    # Source code checkouts
-│   └── .gitkeep
 ├── doc/                    # Documents (Google Docs exports, notes, etc.)
-│   └── .gitkeep
 ├── data/                   # Data artifacts (CSVs, SQLite, downloads)
-│   └── .gitkeep
 ├── README.md               # Project readme (template)
 ├── MEMORY.md               # Agent memory / project context
 ├── flake.nix               # Nix flake for tool management
@@ -96,11 +93,35 @@ Users without these tools can:
 
 ```
 cl9 init [<path>] [-n/--name <name>] [-t/--type <type>]
+cl9 env init ...              # Alias for cl9 init
+cl9 env update [--diff] [--force]
 ```
 
 - `--type`: Environment type to use. Defaults to configured global default, or `default` if not set.
 - `cl9 init --type minimal` - Bare minimum (just `.cl9/` directory)
 - `cl9 init --type default` - Full Nix+direnv setup
+
+### State Tracking
+
+On init, cl9 records delivered files in `.cl9/env/state.json`:
+
+```json
+{
+  "type": "default",
+  "version": "1",
+  "applied_at": "2026-04-03T10:00:00Z",
+  "files": {
+    "README.md": "sha256:abc123...",
+    "flake.nix": "sha256:def456..."
+  }
+}
+```
+
+This enables `cl9 env update` to:
+- Update files unchanged from template (hash matches original)
+- Skip user-modified files with warning
+- `--force` to overwrite user changes anyway
+- `--diff` for dry-run preview
 
 ### Configuration
 
@@ -162,16 +183,15 @@ Built-in environment types:
 ```
 src/cl9/environments/
 ├── default/
-│   ├── src/.gitkeep
-│   ├── doc/.gitkeep
-│   ├── data/.gitkeep
 │   ├── README.md
 │   ├── MEMORY.md
 │   ├── flake.nix
 │   └── .envrc
-└── minimal/
-    └── (empty - just .cl9/ created by init)
+└── minimal/               # Logical built-in type with no template files
 ```
+
+Empty directories like `src/`, `doc/`, and `data/` are created programmatically during initialization rather than tracked with placeholder files.
+The `minimal` type may be handled as a special built-in case in code, since empty directories are not preserved in package distributions.
 
 User environment types:
 ```

@@ -31,10 +31,11 @@ We are not doing large design up front. Features emerge from usage patterns and 
 Build `cl9` as a Python CLI tool with the following initial design:
 
 ### Core Commands (MVP)
-- `cl9 init [<path>] [-n|--name <name>]` - Register/initialize a cl9 project in a directory
+- `cl9 init [<path>] [-n|--name <name>] [-t|--type <type>]` - Register/initialize a cl9 project in a directory
 - `cl9 list` - List all registered projects (supports --format for json/tsv output)
 - `cl9 remove <project>` - Remove project from registry (doesn't delete files)
 - `cl9 enter <target> [-n|--name] [-p|--path]` - Spawn subshell in project directory with cl9 environment
+- `cl9 env init ...` / `cl9 env update ...` - Environment template management
 - `cl9 agent` - Launch LLM agent in current project directory
 
 ### Workflow

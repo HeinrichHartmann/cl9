@@ -4,12 +4,23 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Union
+from typing import List, Tuple, Union
 
 import click
 from click.shell_completion import CompletionItem
 
 from .config import config
+from .environments import (
+    apply_environment,
+    build_template_variables,
+    hash_bytes,
+    hash_file,
+    iter_template_files,
+    load_state,
+    render_template_file,
+    resolve_environment,
+    save_state,
+)
 from .plugins import PluginLoader
 
 
@@ -77,6 +88,127 @@ def _load_local_project_name(project_path: Path) -> str:
         sys.exit(1)
 
     return project_name
+
+
+def _emit_completion_script(shell: str) -> None:
+    """Print the shell completion script for the specified shell."""
+    shell_lower = shell.lower()
+
+    if shell_lower == 'bash':
+        script = '''
+# cl9 bash completion
+eval "$(_CL9_COMPLETE=bash_source cl9)"
+'''
+    elif shell_lower == 'zsh':
+        script = '''
+# cl9 zsh completion
+eval "$(_CL9_COMPLETE=zsh_source cl9)"
+'''
+    elif shell_lower == 'fish':
+        script = '''
+# cl9 fish completion
+eval (env _CL9_COMPLETE=fish_source cl9)
+'''
+    else:
+        raise click.UsageError(f"Unsupported shell: {shell}")
+
+    click.echo(script.strip())
+
+
+def _resolve_environment_spec(env_type: str):
+    """Resolve an environment type or exit with a helpful error."""
+    env_spec = resolve_environment(env_type, config.environments_dir)
+    if env_spec:
+        return env_spec
+
+    click.echo(f"Error: Environment type '{env_type}' was not found.", err=True)
+    click.echo(
+        "Check built-in types, ~/.config/cl9/environments/, or pass a local template path.",
+        err=True,
+    )
+    sys.exit(1)
+
+
+def _planned_environment_paths(project_path: Path, env_spec) -> Tuple[List[Path], List[Path]]:
+    """Return the directories and files initialization will create."""
+    planned_dirs = [
+        project_path / ".cl9",
+        project_path / ".cl9" / "env",
+    ]
+    planned_dirs.extend(project_path / directory for directory in env_spec.directories)
+
+    planned_files = [
+        project_path / ".cl9" / "config.json",
+        project_path / ".cl9" / "env" / "state.json",
+    ]
+
+    for template_file in iter_template_files(env_spec.template_path):
+        planned_files.append(project_path / template_file.relative_to(env_spec.template_path))
+
+    return planned_dirs, planned_files
+
+
+def _fail_on_init_conflicts(project_path: Path, env_spec) -> None:
+    """Abort init if the target directory already contains conflicting paths."""
+    planned_dirs, planned_files = _planned_environment_paths(project_path, env_spec)
+    conflicts = [path for path in planned_dirs + planned_files if path.exists()]
+
+    if not conflicts:
+        return
+
+    click.echo("Error: Cannot initialize because these paths already exist:", err=True)
+    for conflict in sorted(conflicts):
+        rel_path = conflict.relative_to(project_path)
+        click.echo(f"  {rel_path}", err=True)
+    click.echo("Move them out of the way and run 'cl9 init' again.", err=True)
+    sys.exit(1)
+
+
+def _initialize_project(project_path: Path, project_name: str, env_type: str) -> None:
+    """Initialize project files, environment scaffolding, and registry state."""
+    env_spec = _resolve_environment_spec(env_type)
+    _fail_on_init_conflicts(project_path, env_spec)
+
+    cl9_dir = project_path / ".cl9"
+    cl9_dir.mkdir(parents=True)
+
+    project_config = {
+        "name": project_name,
+        "version": "1",
+    }
+
+    config_file = cl9_dir / "config.json"
+    with open(config_file, "w") as f:
+        json.dump(project_config, f, indent=2)
+
+    variables = build_template_variables(project_name, project_path)
+    delivered_paths = apply_environment(env_spec, project_path, variables)
+    delivered_files = {
+        str(path.relative_to(project_path)): hash_file(path)
+        for path in delivered_paths
+    }
+    save_state(project_path, env_type, delivered_files)
+
+    config.add_project(project_name, project_path)
+
+    click.echo(f"Initialized cl9 project: {project_name}")
+    click.echo(f"  Location: {project_path}")
+    click.echo(f"  Environment: {env_type}")
+    click.echo(f"  Local state: {cl9_dir}")
+
+
+def _current_project_path() -> Path:
+    """Return the current project path or exit if not in a cl9 project."""
+    project_path = Path.cwd()
+    cl9_dir = project_path / ".cl9"
+
+    if cl9_dir.exists():
+        return project_path
+
+    click.echo("Error: Not in a cl9 project directory.", err=True)
+    click.echo("Current directory must contain a .cl9/ subdirectory.", err=True)
+    click.echo("Use 'cl9 init' to initialize a project, or 'cl9 enter <target>' to enter one.", err=True)
+    sys.exit(1)
 
 
 def _resolve_registered_project(name: str) -> dict:
@@ -169,7 +301,8 @@ def main():
 @main.command()
 @click.argument("path", required=False, default=".")
 @click.option("-n", "--name", "project_name", help="Explicit project name.")
-def init(path, project_name):
+@click.option("-t", "--type", "env_type", help="Environment type (default: configured default or 'default').")
+def init(path, project_name, env_type):
     """Initialize a cl9 project in a directory.
 
     PATH defaults to the current directory. If --name is not provided, the
@@ -188,6 +321,9 @@ def init(path, project_name):
     if project_name is None:
         project_name = _derive_project_name(project_path)
 
+    if env_type is None:
+        env_type = config.get_default_environment_type()
+
     # Check if project already exists
     if config.project_exists(project_name):
         existing = config.get_project(project_name)
@@ -201,26 +337,7 @@ def init(path, project_name):
         )
         sys.exit(1)
 
-    # Create .cl9 directory
-    cl9_dir = project_path / ".cl9"
-    cl9_dir.mkdir(exist_ok=True)
-
-    # Create basic project config
-    project_config = {
-        "name": project_name,
-        "version": "1",
-    }
-
-    config_file = cl9_dir / "config.json"
-    with open(config_file, "w") as f:
-        json.dump(project_config, f, indent=2)
-
-    # Add to global registry
-    config.add_project(project_name, project_path)
-
-    click.echo(f"Initialized cl9 project: {project_name}")
-    click.echo(f"  Location: {project_path}")
-    click.echo(f"  Local state: {cl9_dir}")
+    _initialize_project(project_path, project_name, env_type)
 
 
 @main.command()
@@ -366,15 +483,7 @@ def agent():
     Must be run from within a cl9 project directory (one with a .cl9/ subdirectory).
     Launches 'claude --continue' in the current directory.
     """
-    current_dir = Path.cwd()
-    cl9_dir = current_dir / ".cl9"
-
-    # Check if we're in a cl9 project
-    if not cl9_dir.exists():
-        click.echo("Error: Not in a cl9 project directory.", err=True)
-        click.echo("Current directory must contain a .cl9/ subdirectory.", err=True)
-        click.echo("Use 'cl9 init' to initialize a project, or 'cl9 enter <target>' to enter one.", err=True)
-        sys.exit(1)
+    current_dir = _current_project_path()
 
     # Get plugin loader
     loader = get_plugin_loader()
@@ -392,35 +501,156 @@ def agent():
     os.execvp("claude", ["claude", "--continue"])
 
 
-@main.command()
-@click.argument('shell', type=click.Choice(['bash', 'zsh', 'fish'], case_sensitive=False))
-def env(shell):
-    """Output shell completion script for the specified shell.
+@main.group()
+def env():
+    """Environment and shell integration commands."""
+    pass
 
-    Usage:
-        source <(cl9 env zsh)     # zsh
-        source <(cl9 env bash)    # bash
-        cl9 env fish | source     # fish
-    """
-    shell_lower = shell.lower()
 
-    if shell_lower == 'bash':
-        script = '''
-# cl9 bash completion
-eval "$(_CL9_COMPLETE=bash_source cl9)"
-'''
-    elif shell_lower == 'zsh':
-        script = '''
-# cl9 zsh completion
-eval "$(_CL9_COMPLETE=zsh_source cl9)"
-'''
-    elif shell_lower == 'fish':
-        script = '''
-# cl9 fish completion
-eval (env _CL9_COMPLETE=fish_source cl9)
-'''
+@env.command("init")
+@click.argument("path", required=False, default=".")
+@click.option("-n", "--name", "project_name", help="Explicit project name.")
+@click.option("-t", "--type", "env_type", help="Environment type (default: configured default or 'default').")
+@click.pass_context
+def env_init(ctx, path, project_name, env_type):
+    """Initialize a cl9 project (alias for 'cl9 init')."""
+    ctx.invoke(init, path=path, project_name=project_name, env_type=env_type)
 
-    click.echo(script.strip())
+
+def _write_rendered_file(dest: Path, template_file: Path, content: bytes) -> None:
+    """Write rendered template content and preserve mode bits."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(content)
+    os.chmod(dest, template_file.stat().st_mode)
+
+
+@env.command("update")
+@click.option("--diff", is_flag=True, help="Show what would change without modifying files.")
+@click.option("--force", is_flag=True, help="Overwrite user-modified files.")
+def env_update(diff, force):
+    """Update the current project's environment from its template."""
+    project_path = _current_project_path()
+    project_name = _load_local_project_name(project_path)
+    state = load_state(project_path)
+
+    if state is None:
+        click.echo("Error: Project was not initialized with environment tracking.", err=True)
+        click.echo("Reinitialize the project environment or add .cl9/env/state.json.", err=True)
+        sys.exit(1)
+
+    env_type = state["type"]
+    env_spec = _resolve_environment_spec(env_type)
+    variables = build_template_variables(project_name, project_path)
+    tracked_files = dict(state.get("files", {}))
+    added_count = 0
+    updated_count = 0
+    skipped_count = 0
+
+    if diff:
+        click.echo("Dry run - no files will be modified")
+    elif force:
+        click.echo(f"Updating environment (type: {env_type}) [FORCE]")
+    else:
+        click.echo(f"Updating environment (type: {env_type})")
+    click.echo()
+
+    for directory in env_spec.directories:
+        dest_dir = project_path / directory
+        if dest_dir.exists():
+            continue
+        if diff:
+            click.echo(f"  Would add dir:  {directory}/")
+        else:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            click.echo(f"  Added dir:      {directory}/")
+        added_count += 1
+
+    for template_file in iter_template_files(env_spec.template_path):
+        rel_path = str(template_file.relative_to(env_spec.template_path))
+        dest = project_path / rel_path
+        rendered = render_template_file(template_file, variables)
+        rendered_hash = hash_bytes(rendered)
+        current_hash = hash_file(dest) if dest.exists() and dest.is_file() else None
+        tracked_hash = tracked_files.get(rel_path)
+
+        if dest.exists() and not dest.is_file():
+            label = "Would skip" if diff else "Skipped"
+            click.echo(f"  {label}:       {rel_path} (path is a directory)")
+            skipped_count += 1
+            continue
+
+        if tracked_hash is None:
+            if dest.exists() and not force:
+                label = "Would skip" if diff else "Skipped"
+                click.echo(f"  {label}:       {rel_path} (existing untracked file)")
+                skipped_count += 1
+                continue
+
+            label = "Would add" if diff else "Added"
+            click.echo(f"  {label}:        {rel_path}")
+            if not diff:
+                _write_rendered_file(dest, template_file, rendered)
+                tracked_files[rel_path] = rendered_hash
+            added_count += 1
+            continue
+
+        if current_hash is None:
+            label = "Would add" if diff else "Added"
+            click.echo(f"  {label}:        {rel_path}")
+            if not diff:
+                _write_rendered_file(dest, template_file, rendered)
+                tracked_files[rel_path] = rendered_hash
+            added_count += 1
+            continue
+
+        if current_hash != tracked_hash and not force:
+            label = "Would skip" if diff else "Skipped"
+            click.echo(f"  {label}:       {rel_path} (modified by user)")
+            skipped_count += 1
+            continue
+
+        if current_hash == rendered_hash and current_hash == tracked_hash:
+            tracked_files[rel_path] = tracked_hash
+            continue
+
+        label = "Would update" if diff else "Updated"
+        suffix = " (was modified)" if current_hash != tracked_hash else ""
+        click.echo(f"  {label}:     {rel_path}{suffix}")
+        if not diff:
+            _write_rendered_file(dest, template_file, rendered)
+            tracked_files[rel_path] = rendered_hash
+        updated_count += 1
+
+    if not diff:
+        save_state(project_path, env_type, tracked_files)
+
+    if added_count == 0 and updated_count == 0 and skipped_count == 0:
+        click.echo("Environment is already up to date.")
+        return
+
+    click.echo()
+    if diff:
+        click.echo(f"{updated_count} updates, {added_count} additions, {skipped_count} skips")
+    else:
+        click.echo(f"{updated_count} updated, {added_count} added, {skipped_count} skipped")
+
+
+@env.command("bash")
+def env_bash():
+    """Output shell completion for Bash."""
+    _emit_completion_script("bash")
+
+
+@env.command("zsh")
+def env_zsh():
+    """Output shell completion for Zsh."""
+    _emit_completion_script("zsh")
+
+
+@env.command("fish")
+def env_fish():
+    """Output shell completion for Fish."""
+    _emit_completion_script("fish")
 
 
 if __name__ == '__main__':

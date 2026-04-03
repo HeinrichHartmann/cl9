@@ -25,9 +25,11 @@ class Config:
         self.db_path = self.data_dir / "projects.db"
         self.global_config_file = self.config_dir / "config.json"
         self.plugins_dir = self.config_dir / "plugins"
+        self._environments_dir = self.config_dir / "environments"
 
         # Ensure plugin directory exists
         self.plugins_dir.mkdir(parents=True, exist_ok=True)
+        self._environments_dir.mkdir(parents=True, exist_ok=True)
 
         self._init_db()
 
@@ -141,10 +143,22 @@ class Config:
         with open(self.global_config_file, 'w') as f:
             json.dump(config_dict, f, indent=2)
 
+    @property
+    def environments_dir(self) -> Path:
+        """User environment types directory."""
+        self._environments_dir.mkdir(parents=True, exist_ok=True)
+        return self._environments_dir
+
+    def get_default_environment_type(self) -> str:
+        """Get configured default environment type."""
+        config_dict = self.load_global_config()
+        return config_dict.get("default_environment_type", "default")
+
     def _default_global_config(self) -> Dict[str, Any]:
         """Return default global configuration."""
         return {
             "version": "1",
+            "default_environment_type": "default",
             "plugins": {},
             "hooks": {}
         }
