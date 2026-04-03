@@ -24,5 +24,10 @@ cl9 = "cl9.cli:main"
 Homepage = "https://github.com/HeinrichHartmann/cl9"
 Repository = "https://github.com/HeinrichHartmann/cl9"
 
+[dependency-groups]
+dev = [
+    "ruff>=0.6.0",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/cl9"]

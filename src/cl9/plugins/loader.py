@@ -3,7 +3,7 @@
 import importlib.util
 import sys
 from pathlib import Path
-from typing import Dict, List, Any, Callable, Optional
+from typing import Dict, List, Any, Callable
 
 
 class PluginLoadError(Exception):

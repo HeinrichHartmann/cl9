@@ -6,7 +6,6 @@ Creates and manages tmux windows for cl9 projects with split-pane layout.
 import os
 import shutil
 import subprocess
-from pathlib import Path
 
 
 # Define PluginLoadError locally to avoid import issues with dynamic loading
@@ -191,7 +190,7 @@ def _create_window_with_split(window_name: str, project_path: str, env: dict):
         print(f"  Bottom pane ({BOTTOM_PANE_PERCENTAGE}%): shell in {project_path}")
         print(f"  Focus: {INITIAL_FOCUS_PANE} pane")
         print()
-        print(f"Use 'exit' or close the window to leave project context.")
+        print("Use 'exit' or close the window to leave project context.")
 
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         print(f"Error: Failed to create tmux window: {e}")

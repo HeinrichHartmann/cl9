@@ -1,9 +1,11 @@
 """CLI commands for cl9."""
 
+import json
 import os
 import sys
-import json
 from pathlib import Path
+from typing import Union
+
 import click
 from click.shell_completion import CompletionItem
 
@@ -35,6 +37,125 @@ def complete_project_names(ctx, param, incomplete):
     ]
 
 
+def _resolve_path(path_value: Union[str, Path]) -> Path:
+    """Resolve a filesystem path, including ``~`` expansion."""
+    return Path(path_value).expanduser().resolve()
+
+
+def _derive_project_name(project_path: Path) -> str:
+    """Derive the default project name from a directory path."""
+    return project_path.name or project_path.anchor.rstrip(os.sep) or project_path.anchor
+
+
+def _load_local_project_name(project_path: Path) -> str:
+    """Load a project name from local .cl9 configuration."""
+    config_file = project_path / ".cl9" / "config.json"
+
+    if not config_file.exists():
+        click.echo(
+            f"Error: Project config not found at {config_file}",
+            err=True,
+        )
+        sys.exit(1)
+
+    try:
+        with open(config_file, "r") as f:
+            project_config = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        click.echo(
+            f"Error: Failed to read project config at {config_file}: {exc}",
+            err=True,
+        )
+        sys.exit(1)
+
+    project_name = project_config.get("name")
+    if not project_name:
+        click.echo(
+            f"Error: Project config at {config_file} is missing a 'name' field.",
+            err=True,
+        )
+        sys.exit(1)
+
+    return project_name
+
+
+def _resolve_registered_project(name: str) -> dict:
+    """Resolve a project from the registry."""
+    project_data = config.get_project(name)
+    if project_data:
+        return project_data
+
+    click.echo(f"Error: Project '{name}' not found in registry.", err=True)
+    click.echo("Use 'cl9 list' to see available projects.", err=True)
+    sys.exit(1)
+
+
+def _resolve_path_project(target: str) -> dict:
+    """Resolve a project from a filesystem path."""
+    project_path = _resolve_path(target)
+
+    if not project_path.exists():
+        click.echo(f"Error: Project path does not exist: {project_path}", err=True)
+        sys.exit(1)
+
+    if not project_path.is_dir():
+        click.echo(f"Error: Project path is not a directory: {project_path}", err=True)
+        sys.exit(1)
+
+    cl9_dir = project_path / ".cl9"
+    if not cl9_dir.is_dir():
+        click.echo(
+            f"Error: Project at {project_path} is not initialized (missing .cl9 directory).",
+            err=True,
+        )
+        click.echo(f"Run 'cl9 init {project_path}' to initialize it.", err=True)
+        sys.exit(1)
+
+    project_name = _load_local_project_name(project_path)
+    project_data = {
+        "name": project_name,
+        "path": str(project_path),
+        "created": None,
+        "last_accessed": None,
+    }
+
+    registered_project = config.get_project(project_name)
+    if registered_project and registered_project["path"] == str(project_path):
+        project_data.update(registered_project)
+
+    return project_data
+
+
+def _resolve_enter_target(target: str, force_name: bool, force_path: bool) -> dict:
+    """Resolve an enter target as either a registry name or filesystem path."""
+    if force_name and force_path:
+        raise click.UsageError("Options '--name' and '--path' are mutually exclusive.")
+
+    if force_name:
+        return _resolve_registered_project(target)
+
+    if force_path:
+        return _resolve_path_project(target)
+
+    project_data = config.get_project(target)
+    if project_data:
+        return project_data
+
+    project_path = _resolve_path(target)
+    if project_path.is_dir() and (project_path / ".cl9").is_dir():
+        return _resolve_path_project(target)
+
+    click.echo(
+        f"Error: Could not resolve '{target}' as a registered project name or initialized project path.",
+        err=True,
+    )
+    if project_path.exists() and project_path.is_dir():
+        click.echo(f"Path exists but is missing .cl9/: {project_path}", err=True)
+    else:
+        click.echo("Use 'cl9 list' to see registered projects or pass '--path' for a path.", err=True)
+    sys.exit(1)
+
+
 @click.group()
 @click.version_option()
 def main():
@@ -46,33 +167,42 @@ def main():
 
 
 @main.command()
-@click.argument('project_name', required=False)
-def init(project_name):
-    """Initialize a cl9 project in the current directory.
+@click.argument("path", required=False, default=".")
+@click.option("-n", "--name", "project_name", help="Explicit project name.")
+def init(path, project_name):
+    """Initialize a cl9 project in a directory.
 
-    If PROJECT_NAME is not provided, uses the directory name.
+    PATH defaults to the current directory. If --name is not provided, the
+    directory name is used.
     """
-    current_dir = Path.cwd()
+    project_path = _resolve_path(path)
 
-    # Determine project name
+    if not project_path.exists():
+        click.echo(f"Error: Project path does not exist: {project_path}", err=True)
+        sys.exit(1)
+
+    if not project_path.is_dir():
+        click.echo(f"Error: Project path is not a directory: {project_path}", err=True)
+        sys.exit(1)
+
     if project_name is None:
-        project_name = current_dir.name
+        project_name = _derive_project_name(project_path)
 
     # Check if project already exists
     if config.project_exists(project_name):
         existing = config.get_project(project_name)
-        if existing['path'] == str(current_dir):
-            click.echo(f"Project '{project_name}' is already initialized in this directory.")
+        if existing["path"] == str(project_path):
+            click.echo(f"Project '{project_name}' is already initialized at {project_path}.")
             return
-        else:
-            click.echo(
-                f"Error: Project name '{project_name}' already exists at {existing['path']}",
-                err=True
-            )
-            sys.exit(1)
+
+        click.echo(
+            f"Error: Project name '{project_name}' already exists at {existing['path']}",
+            err=True,
+        )
+        sys.exit(1)
 
     # Create .cl9 directory
-    cl9_dir = current_dir / ".cl9"
+    cl9_dir = project_path / ".cl9"
     cl9_dir.mkdir(exist_ok=True)
 
     # Create basic project config
@@ -82,14 +212,14 @@ def init(project_name):
     }
 
     config_file = cl9_dir / "config.json"
-    with open(config_file, 'w') as f:
+    with open(config_file, "w") as f:
         json.dump(project_config, f, indent=2)
 
     # Add to global registry
-    config.add_project(project_name, current_dir)
+    config.add_project(project_name, project_path)
 
     click.echo(f"Initialized cl9 project: {project_name}")
-    click.echo(f"  Location: {current_dir}")
+    click.echo(f"  Location: {project_path}")
     click.echo(f"  Local state: {cl9_dir}")
 
 
@@ -128,7 +258,7 @@ def list(format):
                 click.echo(f"  Last accessed: {p['last_accessed']}")
             # Check if directory exists
             if not Path(p['path']).exists():
-                click.echo(f"  ⚠️  Directory not found")
+                click.echo("  ⚠️  Directory not found")
             click.echo()
 
 
@@ -161,8 +291,10 @@ def remove(project):
 
 
 @main.command()
-@click.argument('project', shell_complete=complete_project_names)
-def enter(project):
+@click.argument("target", shell_complete=complete_project_names)
+@click.option("-n", "--name", "force_name", is_flag=True, help="Interpret TARGET as a project name.")
+@click.option("-p", "--path", "force_path", is_flag=True, help="Interpret TARGET as a filesystem path.")
+def enter(target, force_name, force_path):
     """Enter a project context by spawning a subshell in its directory.
 
     Spawns a new shell session in the project directory. Use 'exit' or Ctrl+D
@@ -171,13 +303,7 @@ def enter(project):
     If tmux integration is enabled and you're in a tmux session, creates
     a split-pane window instead of spawning a subshell.
     """
-    # Get project from registry
-    project_data = config.get_project(project)
-
-    if not project_data:
-        click.echo(f"Error: Project '{project}' not found.", err=True)
-        click.echo("Use 'cl9 list' to see available projects.", err=True)
-        sys.exit(1)
+    project_data = _resolve_enter_target(target, force_name, force_path)
 
     # Get plugin loader
     loader = get_plugin_loader()
@@ -196,16 +322,18 @@ def enter(project):
     # Check if .cl9 directory exists
     cl9_dir = project_path / ".cl9"
     if not cl9_dir.exists():
-        click.echo(f"Error: Project is not initialized (missing .cl9 directory)", err=True)
+        click.echo("Error: Project is not initialized (missing .cl9 directory)", err=True)
         click.echo(f"Run 'cl9 init' in {project_path}", err=True)
         sys.exit(1)
 
-    # Update last accessed timestamp
-    config.update_last_accessed(project)
+    # Update last accessed timestamp when entering by a registered name.
+    registered_project = config.get_project(project_data["name"])
+    if registered_project and registered_project["path"] == str(project_path):
+        config.update_last_accessed(project_data["name"])
 
     # Set up cl9 environment variables
     env = os.environ.copy()
-    env['CL9_PROJECT'] = project
+    env['CL9_PROJECT'] = project_data["name"]
     env['CL9_PROJECT_PATH'] = str(project_path)
     env['CL9_ACTIVE'] = '1'
 
@@ -216,9 +344,9 @@ def enter(project):
         return
 
     # Default behavior: spawn subshell
-    click.echo(f"Entering project: {project}")
+    click.echo(f"Entering project: {project_data['name']}")
     click.echo(f"Location: {project_path}")
-    click.echo(f"Type 'exit' or press Ctrl+D to leave project context")
+    click.echo("Type 'exit' or press Ctrl+D to leave project context")
     click.echo()
 
     # Change to project directory
@@ -245,7 +373,7 @@ def agent():
     if not cl9_dir.exists():
         click.echo("Error: Not in a cl9 project directory.", err=True)
         click.echo("Current directory must contain a .cl9/ subdirectory.", err=True)
-        click.echo("Use 'cl9 init' to initialize a project, or 'cl9 enter <project>' to enter one.", err=True)
+        click.echo("Use 'cl9 init' to initialize a project, or 'cl9 enter <target>' to enter one.", err=True)
         sys.exit(1)
 
     # Get plugin loader
