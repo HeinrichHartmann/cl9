@@ -82,6 +82,19 @@ class Config:
                 return dict(row)
             return None
 
+    def get_project_by_path(self, path: Path) -> Optional[dict]:
+        """Get a project by its registered path."""
+        resolved_path = str(path.resolve())
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT name, path, created, last_accessed FROM projects WHERE path = ?",
+                (resolved_path,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+
     def list_projects(self) -> List[dict]:
         """List all registered projects."""
         with self._get_connection() as conn:

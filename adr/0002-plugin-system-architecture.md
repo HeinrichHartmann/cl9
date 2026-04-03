@@ -233,7 +233,7 @@ Plugins as shell scripts invoked via subprocess.
 ### Future Possibilities
 
 - Plugin can register custom CLI commands
-- Plugin can contribute to `cl9 list` output
+- Plugin can contribute to `cl9 project list` output
 - Plugin lifecycle hooks (on_init, on_list, etc.)
 - Plugin dependencies (one plugin requires another)
 - Plugin marketplace/registry (curated community plugins)

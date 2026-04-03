@@ -90,6 +90,11 @@ def _load_local_project_name(project_path: Path) -> str:
     return project_name
 
 
+def _is_initialized_project(project_path: Path) -> bool:
+    """Return True when a directory looks like an initialized cl9 project."""
+    return (project_path / ".cl9" / "config.json").is_file()
+
+
 def _emit_completion_script(shell: str) -> None:
     """Print the shell completion script for the specified shell."""
     shell_lower = shell.lower()
@@ -134,12 +139,14 @@ def _planned_environment_paths(project_path: Path, env_spec) -> Tuple[List[Path]
     planned_dirs = [
         project_path / ".cl9",
         project_path / ".cl9" / "env",
+        project_path / ".cl9" / "claude",
     ]
     planned_dirs.extend(project_path / directory for directory in env_spec.directories)
 
     planned_files = [
         project_path / ".cl9" / "config.json",
         project_path / ".cl9" / "env" / "state.json",
+        project_path / ".cl9" / "claude" / "CLAUDE.md",
     ]
 
     for template_file in iter_template_files(env_spec.template_path):
@@ -164,6 +171,159 @@ def _fail_on_init_conflicts(project_path: Path, env_spec) -> None:
     sys.exit(1)
 
 
+def _build_claude_command(project_root: Path, no_continue: bool) -> List[str]:
+    """Build the Claude Code command using user config plus project-local overlays."""
+    claude_dir = project_root / ".cl9" / "claude"
+    cmd = ["claude", "--setting-sources", "user"]
+
+    claude_md = claude_dir / "CLAUDE.md"
+    if claude_md.is_file():
+        cmd.extend(["--append-system-prompt-file", str(claude_md.resolve())])
+
+    settings_file = claude_dir / "settings.json"
+    if settings_file.is_file():
+        cmd.extend(["--settings", str(settings_file.resolve())])
+
+    mcp_file = claude_dir / "mcp.json"
+    if mcp_file.is_file():
+        cmd.extend(["--mcp-config", str(mcp_file.resolve())])
+
+    if not no_continue:
+        cmd.append("--continue")
+
+    return cmd
+
+
+def _collect_commands(cmd, prefix: str = "", override_name: Union[str, None] = None):
+    """Collect commands recursively for auto-generated manual output."""
+    results = []
+    name = override_name or cmd.name
+    full_name = f"{prefix} {name}".strip()
+    help_text = (cmd.help or "").strip().split("\n")[0]
+
+    if isinstance(cmd, click.Group):
+        for sub_name in sorted(cmd.commands):
+            sub_cmd = cmd.get_command(None, sub_name)
+            if not sub_cmd:
+                continue
+            results.extend(_collect_commands(sub_cmd, full_name, override_name=sub_name))
+        return results
+
+    arguments = []
+    options = []
+    for param in cmd.params:
+        if isinstance(param, click.Argument):
+            arg_name = param.name.upper()
+            if param.nargs != 1:
+                arg_name = f"{arg_name}..."
+            if param.required:
+                arguments.append(arg_name)
+            else:
+                arguments.append(f"[{arg_name}]")
+        elif isinstance(param, click.Option) and param.help:
+            opts = ", ".join(param.opts)
+            options.append((opts, param.help))
+
+    results.append((full_name, help_text, arguments, options))
+    return results
+
+
+def _render_project_list(output_format: str) -> None:
+    """Render registered projects."""
+    projects = config.list_projects()
+
+    if not projects:
+        click.echo("No projects registered.")
+        click.echo("Use 'cl9 project register' to add an initialized project.")
+        return
+
+    format_lower = output_format.lower()
+
+    if format_lower == "json":
+        click.echo(json.dumps(projects, indent=2))
+        return
+
+    if format_lower == "tsv":
+        click.echo("NAME\tPATH\tCREATED\tLAST_ACCESSED")
+        for project in projects:
+            click.echo(
+                f"{project['name']}\t{project['path']}\t{project['created']}\t{project.get('last_accessed', '')}"
+            )
+        return
+
+    click.echo("\nRegistered cl9 Projects:\n")
+    for project in projects:
+        click.echo(f"**{project['name']}**")
+        click.echo(f"  Path: {project['path']}")
+        click.echo(f"  Created: {project['created']}")
+        if project.get("last_accessed"):
+            click.echo(f"  Last accessed: {project['last_accessed']}")
+        if not Path(project["path"]).exists():
+            click.echo("  ⚠️  Directory not found")
+        click.echo()
+
+
+def _register_project_path(project_path: Path) -> None:
+    """Register an initialized project directory."""
+    resolved_path = project_path.resolve()
+
+    if not resolved_path.exists():
+        click.echo(f"Error: Project path does not exist: {resolved_path}", err=True)
+        sys.exit(1)
+
+    if not resolved_path.is_dir():
+        click.echo(f"Error: Project path is not a directory: {resolved_path}", err=True)
+        sys.exit(1)
+
+    if not _is_initialized_project(resolved_path):
+        click.echo(f"Error: {resolved_path} is not an initialized cl9 project.", err=True)
+        click.echo("Expected to find .cl9/config.json in that directory.", err=True)
+        sys.exit(1)
+
+    project_name = _load_local_project_name(resolved_path)
+    existing_by_name = config.get_project(project_name)
+    existing_by_path = config.get_project_by_path(resolved_path)
+
+    if existing_by_name and existing_by_name["path"] == str(resolved_path):
+        click.echo(f"Project '{project_name}' is already registered.")
+        return
+
+    if existing_by_path and existing_by_path["name"] != project_name:
+        config.remove_project(existing_by_path["name"])
+
+    if existing_by_name and existing_by_name["path"] != str(resolved_path):
+        previous_path = Path(existing_by_name["path"])
+        if _is_initialized_project(previous_path):
+            click.echo(
+                f"Error: Project name '{project_name}' is already registered at {existing_by_name['path']}",
+                err=True,
+            )
+            sys.exit(1)
+
+        config.remove_project(project_name)
+
+    config.add_project(project_name, resolved_path)
+    click.echo(f"Registered project '{project_name}'.")
+    click.echo(f"  Path: {resolved_path}")
+
+
+def _prune_projects() -> int:
+    """Remove stale project registrations and return the number pruned."""
+    pruned = 0
+
+    for project in config.list_projects():
+        project_path = Path(project["path"])
+        if project_path.exists() and project_path.is_dir() and _is_initialized_project(project_path):
+            continue
+
+        config.remove_project(project["name"])
+        click.echo(f"Pruned project '{project['name']}'")
+        click.echo(f"  Path was: {project['path']}")
+        pruned += 1
+
+    return pruned
+
+
 def _initialize_project(project_path: Path, project_name: str, env_type: str) -> None:
     """Initialize project files, environment scaffolding, and registry state."""
     env_spec = _resolve_environment_spec(env_type)
@@ -181,15 +341,37 @@ def _initialize_project(project_path: Path, project_name: str, env_type: str) ->
     with open(config_file, "w") as f:
         json.dump(project_config, f, indent=2)
 
+    claude_dir = cl9_dir / "claude"
+    claude_dir.mkdir(parents=True)
+    claude_md = claude_dir / "CLAUDE.md"
+    claude_md.write_text(
+        "\n".join(
+            [
+                f"# {project_name}",
+                "",
+                "This is a cl9-managed project.",
+                "",
+                "## Project Location",
+                "",
+                f"- Root: {project_path}",
+                f"- Config: {cl9_dir}",
+                "",
+                "## Notes",
+                "",
+                "Add project-specific instructions for Claude Code agents here.",
+                "",
+            ]
+        )
+    )
+
     variables = build_template_variables(project_name, project_path)
     delivered_paths = apply_environment(env_spec, project_path, variables)
     delivered_files = {
         str(path.relative_to(project_path)): hash_file(path)
         for path in delivered_paths
     }
+    delivered_files[str(claude_md.relative_to(project_path))] = hash_file(claude_md)
     save_state(project_path, env_type, delivered_files)
-
-    config.add_project(project_name, project_path)
 
     click.echo(f"Initialized cl9 project: {project_name}")
     click.echo(f"  Location: {project_path}")
@@ -200,15 +382,28 @@ def _initialize_project(project_path: Path, project_name: str, env_type: str) ->
 def _current_project_path() -> Path:
     """Return the current project path or exit if not in a cl9 project."""
     project_path = Path.cwd()
-    cl9_dir = project_path / ".cl9"
-
-    if cl9_dir.exists():
+    if _is_initialized_project(project_path):
         return project_path
 
     click.echo("Error: Not in a cl9 project directory.", err=True)
-    click.echo("Current directory must contain a .cl9/ subdirectory.", err=True)
+    click.echo("Current directory must contain .cl9/config.json.", err=True)
     click.echo("Use 'cl9 init' to initialize a project, or 'cl9 enter <target>' to enter one.", err=True)
     sys.exit(1)
+
+
+def _find_project_root(start_path: Union[None, str, Path] = None) -> Union[Path, None]:
+    """Walk up the directory tree to find the nearest cl9 project root."""
+    current = _resolve_path(start_path or Path.cwd())
+
+    while current != current.parent:
+        if _is_initialized_project(current):
+            return current
+        current = current.parent
+
+    if _is_initialized_project(current):
+        return current
+
+    return None
 
 
 def _resolve_registered_project(name: str) -> dict:
@@ -218,7 +413,7 @@ def _resolve_registered_project(name: str) -> dict:
         return project_data
 
     click.echo(f"Error: Project '{name}' not found in registry.", err=True)
-    click.echo("Use 'cl9 list' to see available projects.", err=True)
+    click.echo("Use 'cl9 project list' to see available projects.", err=True)
     sys.exit(1)
 
 
@@ -284,7 +479,7 @@ def _resolve_enter_target(target: str, force_name: bool, force_path: bool) -> di
     if project_path.exists() and project_path.is_dir():
         click.echo(f"Path exists but is missing .cl9/: {project_path}", err=True)
     else:
-        click.echo("Use 'cl9 list' to see registered projects or pass '--path' for a path.", err=True)
+        click.echo("Use 'cl9 project list' to see registered projects or pass '--path' for a path.", err=True)
     sys.exit(1)
 
 
@@ -296,6 +491,54 @@ def main():
     Manage AI-assisted work across isolated project contexts.
     """
     pass
+
+
+@main.command()
+@click.pass_context
+def man(ctx):
+    """Print the complete manual (auto-generated from commands)."""
+    root = ctx.find_root().command
+
+    lines = ["CL9(1)", "", "NAME", "    cl9 - Opinionated LLM session manager", ""]
+    groups = {}
+
+    for cmd_name in sorted(root.list_commands(ctx)):
+        if cmd_name == "man":
+            continue
+        cmd = root.get_command(ctx, cmd_name)
+        if not cmd:
+            continue
+        commands = _collect_commands(cmd, override_name=cmd_name)
+        if commands:
+            groups[cmd_name] = commands
+
+    lines.append("COMMANDS")
+
+    for group_name, commands in groups.items():
+        lines.append(f"\n  {group_name}:")
+        for full_name, help_text, arguments, options in commands:
+            args_str = " ".join(arguments)
+            if args_str:
+                lines.append(f"    cl9 {full_name} {args_str}")
+            else:
+                lines.append(f"    cl9 {full_name}")
+            if help_text:
+                lines.append(f"        {help_text}")
+            for opt, opt_help in options:
+                lines.append(f"        {opt}: {opt_help}")
+
+    lines.extend([
+        "",
+        "FILES",
+        "    .cl9/config.json         Project-local cl9 config",
+        "    .cl9/env/state.json     Environment template state",
+        "    .cl9/claude/CLAUDE.md   Project-local Claude instructions",
+        "",
+        "SEE ALSO",
+        "    cl9 <command> --help",
+    ])
+
+    click.echo("\n".join(lines))
 
 
 @main.command()
@@ -318,93 +561,24 @@ def init(path, project_name, env_type):
         click.echo(f"Error: Project path is not a directory: {project_path}", err=True)
         sys.exit(1)
 
-    if project_name is None:
-        project_name = _derive_project_name(project_path)
-
     if env_type is None:
         env_type = config.get_default_environment_type()
 
-    # Check if project already exists
-    if config.project_exists(project_name):
-        existing = config.get_project(project_name)
-        if existing["path"] == str(project_path):
-            click.echo(f"Project '{project_name}' is already initialized at {project_path}.")
-            return
-
-        click.echo(
-            f"Error: Project name '{project_name}' already exists at {existing['path']}",
-            err=True,
-        )
-        sys.exit(1)
-
-    _initialize_project(project_path, project_name, env_type)
-
-
-@main.command()
-@click.option(
-    '-f', '--format',
-    type=click.Choice(['markdown', 'md', 'json', 'tsv'], case_sensitive=False),
-    default='markdown',
-    help='Output format (default: markdown)'
-)
-def list(format):
-    """List all registered cl9 projects."""
-    projects = config.list_projects()
-
-    if not projects:
-        click.echo("No projects registered.")
-        click.echo("Use 'cl9 init' to register a project.")
+    if _is_initialized_project(project_path):
+        existing_name = _load_local_project_name(project_path)
+        if project_name and project_name != existing_name:
+            click.echo(
+                f"Error: Project is already initialized with name '{existing_name}'.",
+                err=True,
+            )
+            sys.exit(1)
+        click.echo(f"Project '{existing_name}' is already initialized at {project_path}.")
         return
 
-    format_lower = format.lower()
+    if project_name is None:
+        project_name = _derive_project_name(project_path)
 
-    if format_lower == 'json':
-        click.echo(json.dumps(projects, indent=2))
-    elif format_lower == 'tsv':
-        # TSV output: name, path, created, last_accessed
-        click.echo("NAME\tPATH\tCREATED\tLAST_ACCESSED")
-        for p in projects:
-            click.echo(f"{p['name']}\t{p['path']}\t{p['created']}\t{p.get('last_accessed', '')}")
-    else:  # markdown
-        click.echo("\nRegistered cl9 Projects:\n")
-        for p in projects:
-            click.echo(f"**{p['name']}**")
-            click.echo(f"  Path: {p['path']}")
-            click.echo(f"  Created: {p['created']}")
-            if p.get('last_accessed'):
-                click.echo(f"  Last accessed: {p['last_accessed']}")
-            # Check if directory exists
-            if not Path(p['path']).exists():
-                click.echo("  ⚠️  Directory not found")
-            click.echo()
-
-
-@main.command()
-@click.argument('project', shell_complete=complete_project_names)
-def remove(project):
-    """Remove a project from the registry.
-
-    This only removes the project from cl9's registry, it does not delete
-    any files or directories.
-    """
-    # Check if project exists
-    if not config.project_exists(project):
-        click.echo(f"Error: Project '{project}' not found in registry.", err=True)
-        click.echo("Use 'cl9 list' to see registered projects.", err=True)
-        sys.exit(1)
-
-    # Get project details before removing
-    project_data = config.get_project(project)
-
-    # Remove from registry
-    if config.remove_project(project):
-        click.echo(f"Removed project '{project}' from registry.")
-        click.echo(f"  Path was: {project_data['path']}")
-        click.echo()
-        click.echo("Note: Project files and .cl9 directory were not deleted.")
-    else:
-        click.echo(f"Error: Failed to remove project '{project}'.", err=True)
-        sys.exit(1)
+    _initialize_project(project_path, project_name, env_type)
 
 
 @main.command()
@@ -476,45 +650,45 @@ def enter(target, force_name, force_path):
     os.execvpe(shell, [shell], env)
 
 
-@main.command()
-def agent():
-    """Launch an LLM agent in the current project.
+@main.group(invoke_without_command=True)
+@click.pass_context
+def agent(ctx):
+    """Agent management commands."""
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
 
-    Must be run from within a cl9 project directory (one with a .cl9/ subdirectory).
-    Launches 'claude --continue' in the current directory.
-    """
-    current_dir = _current_project_path()
 
-    # Get plugin loader
+@agent.command("spawn")
+@click.option("--no-continue", is_flag=True, help="Don't use --continue flag.")
+def agent_spawn(no_continue):
+    """Spawn a Claude Code agent in the current project."""
+    project_root = _find_project_root()
+    if project_root is None:
+        click.echo("Error: Not inside a cl9 project.", err=True)
+        click.echo("Run from within a directory containing .cl9/ (or a subdirectory).", err=True)
+        sys.exit(1)
+
+    project_name = _load_local_project_name(project_root)
+
     loader = get_plugin_loader()
+    loader.run_hook("pre_agent", project_root)
 
-    # Run pre_agent hooks
-    loader.run_hook('pre_agent', current_dir)
-
-    # Run on_agent hook - plugin may take over
-    if loader.run_hook('on_agent', current_dir):
-        # Plugin handled agent launch
+    if loader.run_hook("on_agent", project_root):
         return
 
-    # Default behavior: Execute claude --continue
-    # Using os.execvp to replace the current process
-    os.execvp("claude", ["claude", "--continue"])
+    env = os.environ.copy()
+    env["CL9_PROJECT"] = project_name
+    env["CL9_PROJECT_PATH"] = str(project_root)
+    env["CL9_ACTIVE"] = "1"
 
+    cmd = _build_claude_command(project_root, no_continue)
 
-@main.group()
-def env():
-    """Environment and shell integration commands."""
-    pass
+    click.echo(f"Spawning agent in project: {project_name}")
+    click.echo(f"Project root: {project_root}")
+    click.echo(f"Overlay: {project_root / '.cl9' / 'claude'}")
+    click.echo()
 
-
-@env.command("init")
-@click.argument("path", required=False, default=".")
-@click.option("-n", "--name", "project_name", help="Explicit project name.")
-@click.option("-t", "--type", "env_type", help="Environment type (default: configured default or 'default').")
-@click.pass_context
-def env_init(ctx, path, project_name, env_type):
-    """Initialize a cl9 project (alias for 'cl9 init')."""
-    ctx.invoke(init, path=path, project_name=project_name, env_type=env_type)
+    os.execvpe("claude", cmd, env)
 
 
 def _write_rendered_file(dest: Path, template_file: Path, content: bytes) -> None:
@@ -524,10 +698,10 @@ def _write_rendered_file(dest: Path, template_file: Path, content: bytes) -> Non
     os.chmod(dest, template_file.stat().st_mode)
 
 
-@env.command("update")
+@main.command("update")
 @click.option("--diff", is_flag=True, help="Show what would change without modifying files.")
 @click.option("--force", is_flag=True, help="Overwrite user-modified files.")
-def env_update(diff, force):
+def update(diff, force):
     """Update the current project's environment from its template."""
     project_path = _current_project_path()
     project_name = _load_local_project_name(project_path)
@@ -635,22 +809,67 @@ def env_update(diff, force):
         click.echo(f"{updated_count} updated, {added_count} added, {skipped_count} skipped")
 
 
-@env.command("bash")
-def env_bash():
-    """Output shell completion for Bash."""
-    _emit_completion_script("bash")
+@main.command()
+@click.argument("shell", type=click.Choice(["bash", "zsh", "fish"], case_sensitive=False))
+def completion(shell):
+    """Output shell completion script for the specified shell."""
+    _emit_completion_script(shell)
 
 
-@env.command("zsh")
-def env_zsh():
-    """Output shell completion for Zsh."""
-    _emit_completion_script("zsh")
+@main.group()
+def project():
+    """Project registry management commands."""
+    pass
 
 
-@env.command("fish")
-def env_fish():
-    """Output shell completion for Fish."""
-    _emit_completion_script("fish")
+@project.command("register")
+@click.argument("path", required=False, default=".")
+def project_register(path):
+    """Register an initialized project in the global registry."""
+    _register_project_path(_resolve_path(path))
+
+
+@project.command("list")
+@click.option(
+    "-f",
+    "--format",
+    type=click.Choice(["markdown", "md", "json", "tsv"], case_sensitive=False),
+    default="markdown",
+    help="Output format (default: markdown)",
+)
+def project_list(format):
+    """List registered projects."""
+    _render_project_list(format)
+
+
+@project.command("remove")
+@click.argument("project_name", shell_complete=complete_project_names)
+def project_remove(project_name):
+    """Remove a project from the registry."""
+    project_data = config.get_project(project_name)
+
+    if not project_data:
+        click.echo(f"Error: Project '{project_name}' not found in registry.", err=True)
+        click.echo("Use 'cl9 project list' to see registered projects.", err=True)
+        sys.exit(1)
+
+    config.remove_project(project_name)
+    click.echo(f"Removed project '{project_name}' from registry.")
+    click.echo(f"  Path was: {project_data['path']}")
+    click.echo()
+    click.echo("Note: Project files and .cl9 directory were not deleted.")
+
+
+@project.command("prune")
+def project_prune():
+    """Remove registrations for projects whose directories are gone or invalid."""
+    pruned = _prune_projects()
+    if pruned == 0:
+        click.echo("No stale project registrations found.")
+        return
+
+    click.echo()
+    click.echo(f"Pruned {pruned} project registrations.")
 
 
 if __name__ == '__main__':

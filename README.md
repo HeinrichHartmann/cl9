@@ -33,21 +33,21 @@ Enable tab completion for project names and commands by adding this to your shel
 
 **Zsh (~/.zshrc):**
 ```zsh
-source <(cl9 env zsh)
+source <(cl9 completion zsh)
 ```
 
 **Bash (~/.bashrc):**
 ```bash
-source <(cl9 env bash)
+source <(cl9 completion bash)
 ```
 
 **Fish (~/.config/fish/config.fish):**
 ```fish
-cl9 env fish | source
+cl9 completion fish | source
 ```
 
 Completions provide:
-- Project name completion for `cl9 enter` and `cl9 remove`
+- Project name completion for `cl9 enter` and `cl9 project remove`
 - Command name completion
 - Option/flag completion
 
@@ -55,13 +55,16 @@ Completions provide:
 
 ```
 cl9 init [<path>] [-n|--name <name>] [-t|--type <type>]
-cl9 list [-f|--format <format>]
-cl9 remove <project>
+cl9 update [--diff] [--force]
 cl9 enter <target> [-n|--name] [-p|--path]
 cl9 agent
-cl9 env init [<path>] [-n|--name <name>] [-t|--type <type>]
-cl9 env update [--diff] [--force]
-cl9 env <bash|zsh|fish>
+cl9 agent spawn [--no-continue]
+cl9 man
+cl9 completion <bash|zsh|fish>
+cl9 project register [<path>]
+cl9 project list [-f|--format <format>]
+cl9 project remove <project>
+cl9 project prune
 ```
 
 ## Commands
@@ -77,9 +80,11 @@ cl9 init [<path>] [-n|--name <name>] [-t|--type <type>]
 
 **Description:**
 
-Registers a directory as a cl9 project. Creates a `.cl9/` subdirectory for project-local state, applies an environment template, and adds the project to the global registry.
+Initializes a directory as a local cl9 project. Creates a `.cl9/` subdirectory and applies an environment template.
 
 If `<path>` is omitted, the current directory is used. If `--name` is not provided, the project name is derived from the directory name. If `--type` is not provided, cl9 uses the configured default environment type, or `default`.
+
+`cl9 init` does not add the project to the global registry. Use `cl9 project register` if you want the project to appear in `cl9 project list` and be enterable by name.
 
 If any generated file or directory already exists in the target location, initialization fails before writing and asks you to move the conflicting paths out of the way.
 
@@ -93,10 +98,6 @@ If any generated file or directory already exists in the target location, initia
   - `env/state.json` tracking delivered environment files
 - `src/`, `doc/`, `data/` - Created by the `default` environment type
 - `README.md`, `MEMORY.md`, `flake.nix`, `.envrc` - Created by the `default` environment type
-
-**Global State:**
-- Project added to registry in XDG config directory
-- Project path and metadata stored
 
 **Examples:**
 ```bash
@@ -113,79 +114,84 @@ cl9 init ~/repos/complicated-project-name --name myapp
 
 # Initialize a minimal project
 cl9 init ~/tmp/scratch --type minimal
+
+# Register it in the global registry afterwards
+cl9 project register ~/tmp/scratch
 ```
 
 ---
 
-### cl9 list
+### cl9 update
 
-List all registered cl9 projects.
+Update the current project's scaffolded environment from its tracked template.
 
 **Usage:**
 ```
-cl9 list [-f|--format <format>]
+cl9 update [--diff] [--force]
 ```
 
 **Description:**
 
-Displays all projects registered in the cl9 global registry. Shows project names, locations, and basic metadata.
+Reapplies the environment template recorded in `.cl9/env/state.json`.
 
 **Options:**
-- `-f, --format <format>` - Output format (default: human-readable)
-  - `markdown` or `md` - Human-readable markdown table (default)
-  - `json` - JSON array of project objects
-  - `tsv` - Tab-separated values
+- `--diff` - Show what would change without modifying files
+- `--force` - Overwrite files that have been modified by the user
 
-**Output (default format):**
-
-Human-readable listing showing:
-- Project name
-- Project path
-- Last accessed (if available)
-- Active sessions (if any)
+By default, `cl9 update`:
+- updates tracked files that still match their previously delivered contents
+- re-adds missing tracked files
+- skips tracked files modified by the user
+- skips existing untracked files instead of overwriting them silently
 
 **Examples:**
 ```bash
-# List all projects (default markdown format)
-cl9 list
+# Preview updates
+cl9 update --diff
 
-# List projects as JSON
-cl9 list --format json
-
-# List projects as TSV for scripting
-cl9 list -f tsv
+# Force-reset tracked files back to the template
+cl9 update --force
 ```
 
 ---
 
-### cl9 remove
+### cl9 project
 
-Remove a project from the registry.
+Manage the global project registry.
 
 **Usage:**
 ```
-cl9 remove <project>
+cl9 project register [<path>]
+cl9 project list [-f|--format <format>]
+cl9 project remove <project>
+cl9 project prune
 ```
 
 **Description:**
 
-Removes a project from the cl9 global registry. This operation only affects the registry - it does not delete any files or directories.
+`cl9 project register` adds an initialized project directory to the global registry by checking for `.cl9/config.json`. This is the command to use after moving an existing project or when you want a locally initialized project to become discoverable by name.
 
-The project's directory and `.cl9/` subdirectory remain intact. Use this command to clean up the registry when:
-- A project was registered with the wrong name
-- A project directory has been moved or deleted
-- You no longer want cl9 to track a project
+`cl9 project list` shows registered projects.
 
-**Arguments:**
-- `<project>` - Name of the registered project to remove
+`cl9 project remove` removes a project from the registry only.
+
+`cl9 project prune` removes registry entries whose directories no longer exist or no longer contain `.cl9/config.json`.
 
 **Examples:**
 ```bash
-# Remove a project from the registry
-cl9 remove old-project
+# Register an initialized project
+cl9 project register ~/work/my-app
 
-# The project files still exist, only the registry entry is removed
-# To re-register, run cl9 init in the project directory
+# List registered projects
+cl9 project list
+
+# Remove a project from the registry
+cl9 project remove old-project
+
+# Remove stale registrations
+cl9 project prune
+
+# The project files still exist; only the registry entry is removed
 ```
 
 ---
@@ -242,78 +248,107 @@ cl9 enter --path ./some-dir
 
 ### cl9 agent
 
-Launch an LLM agent in the current project.
+Launch an isolated Claude Code agent in the current project.
 
 **Usage:**
 ```
 cl9 agent
+cl9 agent spawn [--no-continue]
 ```
 
 **Description:**
 
-Launches a Claude Code session in the current directory. Must be run from within a cl9 project directory (one containing a `.cl9/` subdirectory).
+Launches a Claude Code session with the normal user account/session state plus project-local overlays from `.cl9/claude/`.
 
-This command starts or resumes a Claude Code session using `claude --continue`.
+The command works from any subdirectory within a cl9 project by walking up to the nearest project root containing `.cl9/config.json`.
+
+`cl9 agent` shows the available subcommands. `cl9 agent spawn` runs:
+
+```bash
+claude --setting-sources user \
+  --append-system-prompt-file .cl9/claude/CLAUDE.md \
+  [--settings .cl9/claude/settings.json] \
+  [--mcp-config .cl9/claude/mcp.json] \
+  --continue
+```
+
+This keeps Claude logged in through its normal user-level config while letting each project add its own instructions and optional settings overrides.
+
+Use `--no-continue` to omit the `--continue` flag.
 
 **Requirements:**
-- Must be in a directory with a `.cl9/` subdirectory
+- Must be inside a cl9 project directory or one of its subdirectories
 - `claude` command must be available in PATH
 
 **Examples:**
 ```bash
 # Typical workflow
 cl9 enter myapp      # Enter project by name (spawns subshell)
-cl9 agent            # Launch agent in project
+cl9 agent spawn      # Launch agent in project
+
+# From a nested subdirectory
+cd ~/work/myapp/src/deep/nested
+cl9 agent spawn
+
+# Start without --continue
+cl9 agent spawn --no-continue
+
 # Work with the agent...
 exit                 # Leave project context
 
 # Quick session
-cl9 enter ~/work/myapp && cl9 agent
+cl9 enter ~/work/myapp && cl9 agent spawn
 ```
 
 ---
 
-### cl9 env
+### cl9 man
 
-Environment management and shell integration commands.
+Print the complete manual generated from the current CLI command tree.
 
 **Usage:**
 ```
-cl9 env init [<path>] [-n|--name <name>] [-t|--type <type>]
-cl9 env update [--diff] [--force]
-cl9 env <bash|zsh|fish>
+cl9 man
 ```
 
 **Description:**
 
-`cl9 env init` is an alias for `cl9 init`.
-
-`cl9 env update` reapplies the tracked environment template for the current project. It updates unchanged files, re-adds missing tracked files, skips user-modified files by default, and supports `--diff` and `--force`.
-
-`cl9 env bash`, `cl9 env zsh`, and `cl9 env fish` output shell completion scripts.
+Outputs a manpage-style overview of the current `cl9` command set, including nested subcommands and option summaries. This is generated directly from the Click command definitions so it stays aligned with the implemented CLI.
 
 **Examples:**
 ```bash
-# Alias for init
-cl9 env init ~/work/my-app --type default
+# Print the full manual
+cl9 man
+```
 
-# Preview environment changes without writing
-cl9 env update --diff
+---
 
-# Overwrite modified tracked files
-cl9 env update --force
+### cl9 completion
 
+Output shell completion script for the specified shell.
+
+**Usage:**
+```
+cl9 completion <shell>
+```
+
+**Description:**
+
+Generates shell-specific completion scripts for cl9.
+
+**Examples:**
+```bash
 # Zsh - add to ~/.zshrc
-source <(cl9 env zsh)
+source <(cl9 completion zsh)
 
 # Bash - add to ~/.bashrc
-source <(cl9 env bash)
+source <(cl9 completion bash)
 
 # Fish - add to ~/.config/fish/config.fish
-cl9 env fish | source
+cl9 completion fish | source
 
 # Test completion without installing
-source <(cl9 env zsh)  # Then try: cl9 enter <TAB>
+source <(cl9 completion zsh)  # Then try: cl9 enter <TAB>
 ```
 
 ## Project Structure
@@ -328,7 +363,7 @@ A cl9 project consists of:
 **cl9-managed files:**
 - `.cl9/` - Project-local state (managed by cl9)
   - Session data
-  - Agent environments
+  - Agent configuration in `.cl9/claude/`
   - Project configuration
 
 ## Philosophy

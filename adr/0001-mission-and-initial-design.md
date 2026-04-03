@@ -31,12 +31,13 @@ We are not doing large design up front. Features emerge from usage patterns and 
 Build `cl9` as a Python CLI tool with the following initial design:
 
 ### Core Commands (MVP)
-- `cl9 init [<path>] [-n|--name <name>] [-t|--type <type>]` - Register/initialize a cl9 project in a directory
-- `cl9 list` - List all registered projects (supports --format for json/tsv output)
-- `cl9 remove <project>` - Remove project from registry (doesn't delete files)
+- `cl9 init [<path>] [-n|--name <name>] [-t|--type <type>]` - Initialize local project scaffolding in a directory
+- `cl9 project register [<path>]` - Add an initialized project to the global registry
+- `cl9 project list` / `cl9 project remove <project>` / `cl9 project prune` - Manage the global project registry
+- `cl9 update [--diff] [--force]` - Refresh the current project's scaffolded environment from its tracked template
 - `cl9 enter <target> [-n|--name] [-p|--path]` - Spawn subshell in project directory with cl9 environment
-- `cl9 env init ...` / `cl9 env update ...` - Environment template management
-- `cl9 agent` - Launch LLM agent in current project directory
+- `cl9 completion <shell>` - Output shell completion script
+- `cl9 agent spawn` - Launch isolated LLM agent in current project directory or subdirectory
 
 ### Workflow
 
@@ -46,8 +47,8 @@ The workflow separates context switching from agent launching:
    - Sets environment variables (CL9_PROJECT, CL9_PROJECT_PATH, CL9_ACTIVE)
    - Uses $SHELL for shell-agnostic operation
    - User can work in project, run commands, modify files
-2. **Launch agent**: `cl9 agent` starts LLM agent in current project
-   - Must be run from within a cl9 project directory
+2. **Launch agent**: `cl9 agent spawn` starts LLM agent in current project
+   - Can be run from within a cl9 project directory or any nested subdirectory
    - Can be run multiple times (multiple agents per project)
 3. **Exit context**: `exit` or Ctrl+D returns to original shell
 

@@ -6,16 +6,14 @@
 
 ## Overview
 
-Add `cl9 env` command group with `init` (alias) and `update` subcommands. Track template state to enable safe updates.
+Add top-level `cl9 update` and environment state tracking to enable safe scaffold updates.
 
 ## CLI Structure
 
 ```
-cl9 env init [<path>] [-n/--name] [-t/--type]   # Alias for cl9 init
-cl9 env update [--diff] [--force]               # Update environment from template
+cl9 update [--diff] [--force]                   # Update environment from template
+cl9 project register [<path>]                   # Register initialized project separately
 ```
-
-Note: `cl9 init` remains as primary command. `cl9 env init` is an alias for discoverability.
 
 ## State Tracking
 
@@ -40,7 +38,7 @@ On `cl9 init`, create `.cl9/env/state.json`:
 
 ## Update Logic
 
-`cl9 env update`:
+`cl9 update`:
 
 1. Load `.cl9/env/state.json` (error if missing: "not initialized with environment tracking")
 2. Get template for `state.type`
@@ -172,7 +170,7 @@ save_state(project_path, env_type, delivered_files)
 
 ## Files to Modify
 
-- `src/cl9/cli.py` - Add `env` group with `init` alias and `update` command
+- `src/cl9/cli.py` - Add top-level `update` command
 - `src/cl9/environments/__init__.py` - Add hash/state functions
 - Update `cl9 init` to call `save_state()`
 
@@ -196,10 +194,9 @@ project/
 
 ## Completion Criteria
 
-- [x] `cl9 env init` works as alias for `cl9 init`
 - [x] `cl9 init` creates `.cl9/env/state.json` with file hashes
-- [x] `cl9 env update` updates unchanged files from template
-- [x] `cl9 env update` skips user-modified files with warning
+- [x] `cl9 update` updates unchanged files from template
+- [x] `cl9 update` skips user-modified files with warning
 - [x] `--diff` shows what would change without modifying
 - [x] `--force` overwrites user-modified files
 - [x] Clear output showing what was updated/skipped
@@ -218,6 +215,6 @@ project/
 
 - State is written on every `cl9 init`, including `minimal`, under `.cl9/env/state.json`.
 - State tracks delivered files only; empty managed directories are recreated by environment logic, not hashed.
-- `cl9 env update` safely skips user-modified tracked files unless `--force` is provided.
+- `cl9 update` safely skips user-modified tracked files unless `--force` is provided.
 - If a template introduces a new file that already exists in the project but was never tracked, update skips it rather than overwriting silently.
-- The existing shell completion entrypoints remain available as `cl9 env bash`, `cl9 env zsh`, and `cl9 env fish`.
+- Shell completion entrypoints now live under `cl9 completion`.

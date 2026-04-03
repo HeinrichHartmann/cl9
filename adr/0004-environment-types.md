@@ -93,13 +93,14 @@ Users without these tools can:
 
 ```
 cl9 init [<path>] [-n/--name <name>] [-t/--type <type>]
-cl9 env init ...              # Alias for cl9 init
-cl9 env update [--diff] [--force]
+cl9 update [--diff] [--force]
+cl9 project register [<path>]
 ```
 
 - `--type`: Environment type to use. Defaults to configured global default, or `default` if not set.
 - `cl9 init --type minimal` - Bare minimum (just `.cl9/` directory)
 - `cl9 init --type default` - Full Nix+direnv setup
+- `cl9 init` creates local scaffolding only; `cl9 project register` adds an initialized project to the global registry
 
 ### State Tracking
 
@@ -117,7 +118,7 @@ On init, cl9 records delivered files in `.cl9/env/state.json`:
 }
 ```
 
-This enables `cl9 env update` to:
+This enables `cl9 update` to:
 - Update files unchanged from template (hash matches original)
 - Skip user-modified files with warning
 - `--force` to overwrite user changes anyway

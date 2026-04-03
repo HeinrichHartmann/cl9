@@ -41,3 +41,4 @@ This folder contains task specifications for the implementation model.
 | 001 | Revise CLI for init/enter | Done |
 | 002 | Environment Types | Done |
 | 003 | Env Update Command | Done |
+| 004 | Agent Spawn with Isolation | Done |
