@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
@@ -158,11 +160,21 @@ class CliTests(unittest.TestCase):
             "This is a cl9-managed project.",
             (project_dir / ".cl9" / "profiles" / "default" / "CLAUDE.md").read_text(),
         )
+        self.assertTrue((project_dir / ".cl9" / "profiles" / "default" / "settings.json").exists())
+        self.assertTrue((project_dir / ".cl9" / "profiles" / "default" / "statusline.py").exists())
         state = self._read_state(project_dir)
         self.assertEqual(state["type"], "default")
         self.assertEqual(
             set(state["files"]),
-            {"README.md", "MEMORY.md", "flake.nix", ".envrc", ".cl9/profiles/default/CLAUDE.md"},
+            {
+                "README.md",
+                "MEMORY.md",
+                "flake.nix",
+                ".envrc",
+                ".cl9/profiles/default/CLAUDE.md",
+                ".cl9/profiles/default/settings.json",
+                ".cl9/profiles/default/statusline.py",
+            },
         )
         self.assertIsNone(self.test_config.get_project("demo"))
 
@@ -176,14 +188,17 @@ class CliTests(unittest.TestCase):
         self.assertTrue((project_dir / ".cl9" / "config.json").exists())
         self.assertTrue((project_dir / ".cl9" / "env" / "state.json").exists())
         self.assertTrue((project_dir / ".cl9" / "profiles" / "default" / "CLAUDE.md").exists())
+        self.assertTrue((project_dir / ".cl9" / "profiles" / "default" / "settings.json").exists())
+        self.assertTrue((project_dir / ".cl9" / "profiles" / "default" / "statusline.py").exists())
         self.assertFalse((project_dir / "README.md").exists())
         self.assertFalse((project_dir / "src").exists())
         self.assertEqual(
-            self._read_state(project_dir)["files"],
             {
-                ".cl9/profiles/default/CLAUDE.md":
-                    self._read_state(project_dir)["files"][".cl9/profiles/default/CLAUDE.md"]
+                ".cl9/profiles/default/CLAUDE.md",
+                ".cl9/profiles/default/settings.json",
+                ".cl9/profiles/default/statusline.py",
             },
+            set(self._read_state(project_dir)["files"]),
         )
 
     def test_init_fails_before_writing_when_template_paths_conflict(self):
@@ -258,6 +273,10 @@ class CliTests(unittest.TestCase):
             str((project_dir / ".cl9" / "profiles" / "default" / "CLAUDE.md").resolve()),
             captured["argv"][2],
         )
+        self.assertIn(
+            str((project_dir / ".cl9" / "profiles" / "default" / "settings.json").resolve()),
+            captured["argv"][2],
+        )
         self.assertIn("--session-id 12345678-1234-5678-1234-567812345678", captured["argv"][2])
 
     def test_agent_without_subcommand_shows_help(self):
@@ -285,6 +304,34 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--resume aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", captured["argv"][2])
+
+    def test_agent_spawn_forwards_passthrough_args_after_double_dash(self):
+        project_dir = self.work_dir / "agent-passthrough"
+        project_dir.mkdir()
+        self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", "minimal"])
+        self._chdir(project_dir)
+
+        with patch.object(cli_module.uuid, "uuid4", return_value=uuid.UUID("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")):
+            result, captured = self._invoke_agent(["agent", "spawn", "--", "--model", "sonnet"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("--session-id eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", captured["argv"][2])
+        self.assertIn("--model sonnet", captured["argv"][2])
+
+    def test_agent_continue_forwards_passthrough_args_after_double_dash(self):
+        project_dir = self.work_dir / "agent-continue-passthrough"
+        project_dir.mkdir()
+        self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", "minimal"])
+        self._chdir(project_dir)
+
+        with patch.object(cli_module.uuid, "uuid4", return_value=uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")):
+            self._invoke_agent(["agent", "spawn", "--name", "main"])
+
+        result, captured = self._invoke_agent(["agent", "continue", "main", "--", "--model", "opus"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("--resume ffffffff-ffff-ffff-ffff-ffffffffffff", captured["argv"][2])
+        self.assertIn("--model opus", captured["argv"][2])
 
     def test_agent_spawn_uses_project_local_settings_and_mcp_overrides(self):
         project_dir = self.work_dir / "agent-overrides"
@@ -367,6 +414,35 @@ class CliTests(unittest.TestCase):
         self.assertTrue(captured["env"]["PATH"].startswith(str((project_dir / "bin").resolve())))
         self.assertIn("cd ", captured["argv"][2])
         self.assertIn("exec snapshot --fast", captured["argv"][2])
+
+    def test_default_statusline_renders_project_model_and_context(self):
+        script_path = Path(cli_module.__file__).parent / "profiles" / "default" / "statusline.py"
+        payload = json.dumps(
+            {
+                "model": {"display_name": "Opus"},
+                "session_name": "branch-a",
+                "context_window": {"used_percentage": 58, "context_window_size": 200000},
+                "cost": {"total_cost_usd": 1.23},
+            }
+        )
+        env = os.environ.copy()
+        env["CL9_PROJECT"] = "demo"
+        env["CL9_PROFILE"] = "careful"
+
+        result = subprocess.run(
+            [sys.executable, str(script_path)],
+            input=payload,
+            text=True,
+            capture_output=True,
+            check=True,
+            env=env,
+        )
+
+        self.assertIn("[demo]", result.stdout)
+        self.assertIn("branch-a", result.stdout)
+        self.assertIn("Opus", result.stdout)
+        self.assertIn("58%", result.stdout)
+        self.assertIn("200k", result.stdout)
 
     def test_project_register_adds_initialized_project_to_registry(self):
         project_dir = self.work_dir / "register-me"

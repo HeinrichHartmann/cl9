@@ -1,0 +1,6 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "python3 \"${CL9_PROJECT_PATH}/.cl9/profiles/default/statusline.py\""
+  }
+}
