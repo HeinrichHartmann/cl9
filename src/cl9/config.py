@@ -26,10 +26,12 @@ class Config:
         self.global_config_file = self.config_dir / "config.json"
         self.plugins_dir = self.config_dir / "plugins"
         self._environments_dir = self.config_dir / "environments"
+        self._profiles_dir = Path.home() / ".cl9" / "profiles"
 
         # Ensure plugin directory exists
         self.plugins_dir.mkdir(parents=True, exist_ok=True)
         self._environments_dir.mkdir(parents=True, exist_ok=True)
+        self._profiles_dir.mkdir(parents=True, exist_ok=True)
 
         self._init_db()
 
@@ -161,6 +163,12 @@ class Config:
         """User environment types directory."""
         self._environments_dir.mkdir(parents=True, exist_ok=True)
         return self._environments_dir
+
+    @property
+    def profiles_dir(self) -> Path:
+        """User agent profiles directory."""
+        self._profiles_dir.mkdir(parents=True, exist_ok=True)
+        return self._profiles_dir
 
     def get_default_environment_type(self) -> str:
         """Get configured default environment type."""

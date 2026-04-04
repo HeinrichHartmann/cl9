@@ -54,13 +54,21 @@ Completions provide:
 ## Synopsis
 
 ```
-cl9 init [<path>] [-n|--name <name>] [-t|--type <type>]
-cl9 update [--diff] [--force]
+cl9 init [<path>] [-n|--name <name>] [-t|--type <type>] [--force]
 cl9 enter <target> [-n|--name] [-p|--path]
+cl9 run <command> [args...]
 cl9 agent
-cl9 agent spawn [--no-continue]
+cl9 agent spawn [--name <name>] [-p|--profile <profile>]
+cl9 agent continue [<target>]
+cl9 agent fork <target> [--name <name>] [-p|--profile <profile>]
+cl9 session list
+cl9 session prune [--older-than <days>d]
+cl9 session delete <target> [--force]
 cl9 man
 cl9 completion <bash|zsh|fish>
+cl9 project init [<path>] [-n|--name <name>] [-t|--type <type>] [--force]
+cl9 project enter <target> [-n|--name] [-p|--path]
+cl9 project run <command> [args...]
 cl9 project register [<path>]
 cl9 project list [-f|--format <format>]
 cl9 project remove <project>
@@ -75,7 +83,7 @@ Initialize a cl9 project in a directory.
 
 **Usage:**
 ```
-cl9 init [<path>] [-n|--name <name>] [-t|--type <type>]
+cl9 init [<path>] [-n|--name <name>] [-t|--type <type>] [--force]
 ```
 
 **Description:**
@@ -86,15 +94,17 @@ If `<path>` is omitted, the current directory is used. If `--name` is not provid
 
 `cl9 init` does not add the project to the global registry. Use `cl9 project register` if you want the project to appear in `cl9 project list` and be enterable by name.
 
-If any generated file or directory already exists in the target location, initialization fails before writing and asks you to move the conflicting paths out of the way.
+If the target is already initialized, `cl9 init` becomes a preview command and shows what would be changed. Use `cl9 init --force` to re-apply the template and overwrite matching files.
 
 **Options:**
 - `-n, --name <name>` - Explicit project name
 - `-t, --type <type>` - Environment type to apply (`default` or `minimal`, plus user/local templates)
+- `--force` - Re-apply the selected template to an initialized project
 
 **Files Created:**
 - `.cl9/` - Project-local state directory
   - Configuration
+  - `profiles/default/CLAUDE.md` default agent profile
   - `env/state.json` tracking delivered environment files
 - `src/`, `doc/`, `data/` - Created by the `default` environment type
 - `README.md`, `MEMORY.md`, `flake.nix`, `.envrc` - Created by the `default` environment type
@@ -117,40 +127,12 @@ cl9 init ~/tmp/scratch --type minimal
 
 # Register it in the global registry afterwards
 cl9 project register ~/tmp/scratch
-```
 
----
+# Preview changes for an existing initialized project
+cl9 init ~/tmp/scratch
 
-### cl9 update
-
-Update the current project's scaffolded environment from its tracked template.
-
-**Usage:**
-```
-cl9 update [--diff] [--force]
-```
-
-**Description:**
-
-Reapplies the environment template recorded in `.cl9/env/state.json`.
-
-**Options:**
-- `--diff` - Show what would change without modifying files
-- `--force` - Overwrite files that have been modified by the user
-
-By default, `cl9 update`:
-- updates tracked files that still match their previously delivered contents
-- re-adds missing tracked files
-- skips tracked files modified by the user
-- skips existing untracked files instead of overwriting them silently
-
-**Examples:**
-```bash
-# Preview updates
-cl9 update --diff
-
-# Force-reset tracked files back to the template
-cl9 update --force
+# Re-apply the template and overwrite matching files
+cl9 init ~/tmp/scratch --force
 ```
 
 ---
@@ -246,6 +228,28 @@ cl9 enter --path ./some-dir
 
 ---
 
+### cl9 run
+
+Run a command in the current project environment.
+
+**Usage:**
+```
+cl9 run <command> [args...]
+cl9 project run <command> [args...]
+```
+
+**Description:**
+
+Runs the command inside the current project's execution environment. `bin/` at the project root is prepended to `PATH`, `CL9_*` environment variables are set, and the command is executed through the user's shell from the project root.
+
+**Examples:**
+```bash
+cl9 run snapshot
+cl9 project run lint --fix
+```
+
+---
+
 ### cl9 agent
 
 Launch an isolated Claude Code agent in the current project.
@@ -253,28 +257,38 @@ Launch an isolated Claude Code agent in the current project.
 **Usage:**
 ```
 cl9 agent
-cl9 agent spawn [--no-continue]
+cl9 agent spawn [--name <name>] [-p|--profile <profile>]
+cl9 agent continue [<target>]
+cl9 agent fork <target> [--name <name>] [-p|--profile <profile>]
 ```
 
 **Description:**
 
-Launches a Claude Code session with the normal user account/session state plus project-local overlays from `.cl9/claude/`.
+Launches or resumes Claude Code sessions tracked in the current project's `.cl9/state.db`.
 
 The command works from any subdirectory within a cl9 project by walking up to the nearest project root containing `.cl9/config.json`.
 
-`cl9 agent` shows the available subcommands. `cl9 agent spawn` runs:
+Profiles are resolved from:
+- `.cl9/profiles/<name>/` as the project-local working copy
+- `~/.cl9/profiles/<name>/` for user-installed profiles
+- built-in profiles shipped with `cl9`
+
+`cl9 agent spawn` creates a new tracked session. `cl9 agent continue` resumes a previously tracked session, and `cl9 agent fork` forks an existing session into a new one.
+
+There is no separate `cl9 profile` command. Built-in profiles are documented by `cl9`, and additional profiles are installed by placing directories under `~/.cl9/profiles/`.
+
+When a profile is used, `cl9` materializes a working copy in `.cl9/profiles/<name>/`. That project-local copy is managed state. It may be mutated by the agent or by `cl9` and should not be edited by the user directly.
+
+Claude is launched with project-local profile files layered on top of user-level Claude settings:
 
 ```bash
 claude --setting-sources user \
-  --append-system-prompt-file .cl9/claude/CLAUDE.md \
-  [--settings .cl9/claude/settings.json] \
-  [--mcp-config .cl9/claude/mcp.json] \
-  --continue
+  --append-system-prompt-file .cl9/profiles/default/CLAUDE.md \
+  [--settings .cl9/profiles/default/settings.json] \
+  [--mcp-config .cl9/profiles/default/mcp.json]
 ```
 
-This keeps Claude logged in through its normal user-level config while letting each project add its own instructions and optional settings overrides.
-
-Use `--no-continue` to omit the `--continue` flag.
+This keeps Claude logged in through its normal user-level config while letting each project add project-local profile overlays.
 
 **Requirements:**
 - Must be inside a cl9 project directory or one of its subdirectories
@@ -290,14 +304,38 @@ cl9 agent spawn      # Launch agent in project
 cd ~/work/myapp/src/deep/nested
 cl9 agent spawn
 
-# Start without --continue
-cl9 agent spawn --no-continue
+# Resume the latest tracked session
+cl9 agent continue
 
-# Work with the agent...
-exit                 # Leave project context
+# Fork a tracked session
+cl9 agent fork latest --name branch-a
 
 # Quick session
 cl9 enter ~/work/myapp && cl9 agent spawn
+```
+
+---
+
+### cl9 session
+
+Manage project-local tracked sessions.
+
+**Usage:**
+```
+cl9 session list
+cl9 session prune [--older-than <days>d]
+cl9 session delete <target> [--force]
+```
+
+**Description:**
+
+These commands operate on `cl9`'s local session metadata in `.cl9/state.db`. They do not remove Claude-owned history from `~/.claude`.
+
+**Examples:**
+```bash
+cl9 session list
+cl9 session prune --older-than 30d
+cl9 session delete latest
 ```
 
 ---
@@ -363,7 +401,7 @@ A cl9 project consists of:
 **cl9-managed files:**
 - `.cl9/` - Project-local state (managed by cl9)
   - Session data
-  - Agent configuration in `.cl9/claude/`
+  - Agent profile working copies in `.cl9/profiles/`
   - Project configuration
 
 ## Philosophy

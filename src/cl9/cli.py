@@ -2,7 +2,10 @@
 
 import json
 import os
+import shlex
+import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import List, Tuple, Union
 
@@ -22,6 +25,8 @@ from .environments import (
     save_state,
 )
 from .plugins import PluginLoader
+from .profiles import builtin_profile, resolve_profile
+from .sessions import ProjectState
 
 
 # Global plugin loader (initialized once)
@@ -60,6 +65,21 @@ def _derive_project_name(project_path: Path) -> str:
 
 def _load_local_project_name(project_path: Path) -> str:
     """Load a project name from local .cl9 configuration."""
+    project_config = _load_local_project_config(project_path)
+    project_name = project_config.get("name")
+    if not project_name:
+        config_file = project_path / ".cl9" / "config.json"
+        click.echo(
+            f"Error: Project config at {config_file} is missing a 'name' field.",
+            err=True,
+        )
+        sys.exit(1)
+
+    return project_name
+
+
+def _load_local_project_config(project_path: Path) -> dict:
+    """Load project metadata from local .cl9 configuration."""
     config_file = project_path / ".cl9" / "config.json"
 
     if not config_file.exists():
@@ -78,21 +98,39 @@ def _load_local_project_name(project_path: Path) -> str:
             err=True,
         )
         sys.exit(1)
-
-    project_name = project_config.get("name")
-    if not project_name:
-        click.echo(
-            f"Error: Project config at {config_file} is missing a 'name' field.",
-            err=True,
-        )
-        sys.exit(1)
-
-    return project_name
+    return project_config
 
 
 def _is_initialized_project(project_path: Path) -> bool:
     """Return True when a directory looks like an initialized cl9 project."""
     return (project_path / ".cl9" / "config.json").is_file()
+
+
+def _project_state(project_path: Path) -> ProjectState:
+    """Return the project-local state manager."""
+    return ProjectState(project_path)
+
+
+def _default_profile_name(project_path: Path) -> str:
+    """Return the configured default profile name."""
+    project_config = _load_local_project_config(project_path)
+    return project_config.get("default_profile", "default")
+
+
+def _project_profiles_dir(project_path: Path) -> Path:
+    """Return the project-local profiles directory."""
+    return project_path / ".cl9" / "profiles"
+
+
+def _project_context_env(project_path: Path, project_name: str) -> dict:
+    """Build the shared project execution environment."""
+    env = os.environ.copy()
+    project_bin = project_path / "bin"
+    env["PATH"] = f"{project_bin}:{env.get('PATH', '')}" if env.get("PATH") else str(project_bin)
+    env["CL9_PROJECT"] = project_name
+    env["CL9_PROJECT_PATH"] = str(project_path)
+    env["CL9_ACTIVE"] = "1"
+    return env
 
 
 def _emit_completion_script(shell: str) -> None:
@@ -139,14 +177,15 @@ def _planned_environment_paths(project_path: Path, env_spec) -> Tuple[List[Path]
     planned_dirs = [
         project_path / ".cl9",
         project_path / ".cl9" / "env",
-        project_path / ".cl9" / "claude",
+        project_path / ".cl9" / "profiles",
+        project_path / ".cl9" / "profiles" / "default",
     ]
     planned_dirs.extend(project_path / directory for directory in env_spec.directories)
 
     planned_files = [
         project_path / ".cl9" / "config.json",
         project_path / ".cl9" / "env" / "state.json",
-        project_path / ".cl9" / "claude" / "CLAUDE.md",
+        project_path / ".cl9" / "profiles" / "default" / "CLAUDE.md",
     ]
 
     for template_file in iter_template_files(env_spec.template_path):
@@ -171,27 +210,149 @@ def _fail_on_init_conflicts(project_path: Path, env_spec) -> None:
     sys.exit(1)
 
 
-def _build_claude_command(project_root: Path, no_continue: bool) -> List[str]:
-    """Build the Claude Code command using user config plus project-local overlays."""
-    claude_dir = project_root / ".cl9" / "claude"
+def _render_default_profile_files(project_path: Path, project_name: str) -> List[Tuple[str, bytes, Path]]:
+    """Render the default project-local profile scaffold."""
+    default_profile = builtin_profile("default")
+    if default_profile is None:
+        raise click.ClickException("Built-in default profile is missing.")
+
+    variables = build_template_variables(project_name, project_path)
+    rendered_files: List[Tuple[str, bytes, Path]] = []
+    for profile_file in sorted(default_profile.path.rglob("*")):
+        if not profile_file.is_file():
+            continue
+        rel_path = Path(".cl9") / "profiles" / "default" / profile_file.relative_to(default_profile.path)
+        rendered_files.append((str(rel_path), render_template_file(profile_file, variables), profile_file))
+    return rendered_files
+
+
+def _materialize_profile(project_root: Path, profile_name: str) -> Path:
+    """Ensure a profile has a project-local working copy and return its path."""
+    local_dir = _project_profiles_dir(project_root) / profile_name
+    if local_dir.is_dir():
+        return local_dir.resolve()
+
+    resolved = resolve_profile(profile_name, project_root, config.profiles_dir)
+    if resolved is None or resolved.path.resolve() == local_dir.resolve():
+        raise click.ClickException(f"Profile '{profile_name}' was not found.")
+
+    variables = build_template_variables(_load_local_project_name(project_root), project_root)
+    local_dir.mkdir(parents=True, exist_ok=True)
+    for source_file in sorted(resolved.path.rglob("*")):
+        if not source_file.is_file():
+            continue
+        dest = local_dir / source_file.relative_to(resolved.path)
+        _write_rendered_file(dest, source_file, render_template_file(source_file, variables))
+
+    return local_dir.resolve()
+
+
+def _desired_project_files(project_path: Path, project_name: str, env_type: str) -> Tuple[object, List[Tuple[str, bytes, Path]]]:
+    """Return the environment spec and rendered managed files for a project."""
+    env_spec = _resolve_environment_spec(env_type)
+    variables = build_template_variables(project_name, project_path)
+    desired_files: List[Tuple[str, bytes, Path]] = []
+
+    for template_file in iter_template_files(env_spec.template_path):
+        rel_path = str(template_file.relative_to(env_spec.template_path))
+        desired_files.append((rel_path, render_template_file(template_file, variables), template_file))
+
+    desired_files.extend(_render_default_profile_files(project_path, project_name))
+    return env_spec, desired_files
+
+
+def _sync_project_files(project_path: Path, project_name: str, env_type: str, diff: bool, force: bool) -> bool:
+    """Preview or apply the managed project files."""
+    env_spec, desired_files = _desired_project_files(project_path, project_name, env_type)
+    changed = False
+
+    click.echo("Dry run - no files will be modified" if diff else f"Applying template: {env_type}")
+    click.echo()
+
+    for directory in env_spec.directories:
+        dest_dir = project_path / directory
+        if dest_dir.exists():
+            continue
+        click.echo(f"  {'Would add' if diff else 'Added'} dir:  {directory}/")
+        if not diff:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        changed = True
+
+    (_project_profiles_dir(project_path) / "default").mkdir(parents=True, exist_ok=True) if not diff else None
+
+    delivered_files = {}
+    for rel_path, rendered, source_path in desired_files:
+        dest = project_path / rel_path
+        rendered_hash = hash_bytes(rendered)
+        current_hash = hash_file(dest) if dest.exists() and dest.is_file() else None
+
+        if current_hash == rendered_hash:
+            delivered_files[rel_path] = rendered_hash
+            continue
+
+        label = None
+        if not dest.exists():
+            label = "Would add" if diff else "Added"
+        elif diff and not force:
+            label = "Would clobber"
+        elif diff and force:
+            label = "Would overwrite"
+        elif force:
+            label = "Overwrote"
+        else:
+            label = "Would clobber"
+
+        click.echo(f"  {label}:   {rel_path}")
+        changed = True
+
+        if not diff:
+            _write_rendered_file(dest, source_path, rendered)
+            delivered_files[rel_path] = rendered_hash
+
+    if not diff:
+        save_state(project_path, env_type, delivered_files)
+
+    if not changed:
+        click.echo("Project is already up to date.")
+
+    return changed
+
+
+def _build_agent_command(project_root: Path, profile_name: str, extra_args: List[str]) -> List[str]:
+    """Build the Claude Code command using the resolved profile."""
+    _materialize_profile(project_root, profile_name)
+    profile = resolve_profile(profile_name, project_root, config.profiles_dir)
+    if profile is None:
+        raise click.ClickException(f"Profile '{profile_name}' was not found.")
+
     cmd = ["claude", "--setting-sources", "user"]
 
-    claude_md = claude_dir / "CLAUDE.md"
+    claude_md = profile.claude_md
     if claude_md.is_file():
         cmd.extend(["--append-system-prompt-file", str(claude_md.resolve())])
 
-    settings_file = claude_dir / "settings.json"
+    settings_file = profile.settings_json
     if settings_file.is_file():
         cmd.extend(["--settings", str(settings_file.resolve())])
 
-    mcp_file = claude_dir / "mcp.json"
+    mcp_file = profile.mcp_json
     if mcp_file.is_file():
         cmd.extend(["--mcp-config", str(mcp_file.resolve())])
 
-    if not no_continue:
-        cmd.append("--continue")
-
+    cmd.extend(extra_args)
     return cmd
+
+
+def _shell_executable(env: dict) -> str:
+    """Return the preferred shell executable."""
+    return env.get("SHELL", os.environ.get("SHELL", "/bin/sh"))
+
+
+def _spawn_in_project_shell(cwd: Path, env: dict, argv: List[str]) -> subprocess.Popen:
+    """Spawn a command inside the user's shell with project context."""
+    shell = _shell_executable(env)
+    script = f"cd {shlex.quote(str(cwd.resolve()))} && exec {shlex.join(argv)}"
+    return subprocess.Popen([shell, "-ic", script], env=env)
 
 
 def _collect_commands(cmd, prefix: str = "", override_name: Union[str, None] = None):
@@ -341,36 +502,20 @@ def _initialize_project(project_path: Path, project_name: str, env_type: str) ->
     with open(config_file, "w") as f:
         json.dump(project_config, f, indent=2)
 
-    claude_dir = cl9_dir / "claude"
-    claude_dir.mkdir(parents=True)
-    claude_md = claude_dir / "CLAUDE.md"
-    claude_md.write_text(
-        "\n".join(
-            [
-                f"# {project_name}",
-                "",
-                "This is a cl9-managed project.",
-                "",
-                "## Project Location",
-                "",
-                f"- Root: {project_path}",
-                f"- Config: {cl9_dir}",
-                "",
-                "## Notes",
-                "",
-                "Add project-specific instructions for Claude Code agents here.",
-                "",
-            ]
-        )
-    )
-
     variables = build_template_variables(project_name, project_path)
     delivered_paths = apply_environment(env_spec, project_path, variables)
     delivered_files = {
         str(path.relative_to(project_path)): hash_file(path)
         for path in delivered_paths
     }
-    delivered_files[str(claude_md.relative_to(project_path))] = hash_file(claude_md)
+
+    profiles_dir = _project_profiles_dir(project_path) / "default"
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    for rel_path, rendered, source_path in _render_default_profile_files(project_path, project_name):
+        dest = project_path / rel_path
+        _write_rendered_file(dest, source_path, rendered)
+        delivered_files[rel_path] = hash_bytes(rendered)
+
     save_state(project_path, env_type, delivered_files)
 
     click.echo(f"Initialized cl9 project: {project_name}")
@@ -381,12 +526,12 @@ def _initialize_project(project_path: Path, project_name: str, env_type: str) ->
 
 def _current_project_path() -> Path:
     """Return the current project path or exit if not in a cl9 project."""
-    project_path = Path.cwd()
-    if _is_initialized_project(project_path):
+    project_path = _find_project_root()
+    if project_path is not None:
         return project_path
 
     click.echo("Error: Not in a cl9 project directory.", err=True)
-    click.echo("Current directory must contain .cl9/config.json.", err=True)
+    click.echo("Current directory must be inside a directory containing .cl9/config.json.", err=True)
     click.echo("Use 'cl9 init' to initialize a project, or 'cl9 enter <target>' to enter one.", err=True)
     sys.exit(1)
 
@@ -429,10 +574,9 @@ def _resolve_path_project(target: str) -> dict:
         click.echo(f"Error: Project path is not a directory: {project_path}", err=True)
         sys.exit(1)
 
-    cl9_dir = project_path / ".cl9"
-    if not cl9_dir.is_dir():
+    if not _is_initialized_project(project_path):
         click.echo(
-            f"Error: Project at {project_path} is not initialized (missing .cl9 directory).",
+            f"Error: Project at {project_path} is not initialized (missing .cl9/config.json).",
             err=True,
         )
         click.echo(f"Run 'cl9 init {project_path}' to initialize it.", err=True)
@@ -532,7 +676,8 @@ def man(ctx):
         "FILES",
         "    .cl9/config.json         Project-local cl9 config",
         "    .cl9/env/state.json     Environment template state",
-        "    .cl9/claude/CLAUDE.md   Project-local Claude instructions",
+        "    .cl9/profiles/default/CLAUDE.md   Project-local default agent profile",
+        "    .cl9/state.db           Project-local session/process state",
         "",
         "SEE ALSO",
         "    cl9 <command> --help",
@@ -541,16 +686,8 @@ def man(ctx):
     click.echo("\n".join(lines))
 
 
-@main.command()
-@click.argument("path", required=False, default=".")
-@click.option("-n", "--name", "project_name", help="Explicit project name.")
-@click.option("-t", "--type", "env_type", help="Environment type (default: configured default or 'default').")
-def init(path, project_name, env_type):
-    """Initialize a cl9 project in a directory.
-
-    PATH defaults to the current directory. If --name is not provided, the
-    directory name is used.
-    """
+def _init_command(path: str, project_name: Union[str, None], env_type: Union[str, None], force: bool) -> None:
+    """Implementation for init commands and aliases."""
     project_path = _resolve_path(path)
 
     if not project_path.exists():
@@ -561,10 +698,8 @@ def init(path, project_name, env_type):
         click.echo(f"Error: Project path is not a directory: {project_path}", err=True)
         sys.exit(1)
 
-    if env_type is None:
-        env_type = config.get_default_environment_type()
-
-    if _is_initialized_project(project_path):
+    existing_project = _is_initialized_project(project_path)
+    if existing_project:
         existing_name = _load_local_project_name(project_path)
         if project_name and project_name != existing_name:
             click.echo(
@@ -572,13 +707,92 @@ def init(path, project_name, env_type):
                 err=True,
             )
             sys.exit(1)
-        click.echo(f"Project '{existing_name}' is already initialized at {project_path}.")
-        return
-
-    if project_name is None:
+        project_name = existing_name
+    elif project_name is None:
         project_name = _derive_project_name(project_path)
 
+    if env_type is None:
+        state = load_state(project_path) if existing_project else None
+        env_type = state["type"] if state else config.get_default_environment_type()
+
+    if existing_project and not force:
+        _sync_project_files(project_path, project_name, env_type, diff=True, force=False)
+        click.echo()
+        click.echo("Run 'cl9 init --force' to apply these changes.")
+        return
+
+    if existing_project:
+        _sync_project_files(project_path, project_name, env_type, diff=False, force=True)
+        click.echo()
+        click.echo(f"Reinitialized cl9 project: {project_name}")
+        click.echo(f"  Location: {project_path}")
+        click.echo(f"  Environment: {env_type}")
+        return
+
     _initialize_project(project_path, project_name, env_type)
+
+
+def _enter_command(target: str, force_name: bool, force_path: bool) -> None:
+    """Implementation for enter commands and aliases."""
+    project_data = _resolve_enter_target(target, force_name, force_path)
+
+    loader = get_plugin_loader()
+    loader.run_hook("pre_enter", project_data)
+
+    project_path = Path(project_data["path"])
+    if not project_path.exists():
+        click.echo(f"Error: Project directory does not exist: {project_path}", err=True)
+        sys.exit(1)
+
+    if not _is_initialized_project(project_path):
+        click.echo("Error: Project is not initialized (missing .cl9/config.json)", err=True)
+        click.echo(f"Run 'cl9 init' in {project_path}", err=True)
+        sys.exit(1)
+
+    registered_project = config.get_project(project_data["name"])
+    if registered_project and registered_project["path"] == str(project_path):
+        config.update_last_accessed(project_data["name"])
+
+    env = _project_context_env(project_path, project_data["name"])
+
+    if loader.run_hook("on_enter", project_data, env):
+        return
+
+    click.echo(f"Entering project: {project_data['name']}")
+    click.echo(f"Location: {project_path}")
+    click.echo("Type 'exit' or press Ctrl+D to leave project context")
+    click.echo()
+
+    os.chdir(project_path)
+    shell = _shell_executable(env)
+    os.execvpe(shell, [shell], env)
+
+
+def _run_project_command(command_argv: Tuple[str, ...]) -> None:
+    """Run a command in the current project's shell environment."""
+    project_path = _current_project_path()
+    project_name = _load_local_project_name(project_path)
+    env = _project_context_env(project_path, project_name)
+
+    if not command_argv:
+        raise click.UsageError("COMMAND is required.")
+
+    process = _spawn_in_project_shell(project_path, env, list(command_argv))
+    sys.exit(process.wait())
+
+
+@main.command()
+@click.argument("path", required=False, default=".")
+@click.option("-n", "--name", "project_name", help="Explicit project name.")
+@click.option("-t", "--type", "env_type", help="Environment type (default: configured default or 'default').")
+@click.option("--force", is_flag=True, help="Re-apply the template to an initialized project.")
+def init(path, project_name, env_type, force):
+    """Initialize a cl9 project in a directory.
+
+    PATH defaults to the current directory. If --name is not provided, the
+    directory name is used.
+    """
+    _init_command(path, project_name, env_type, force)
 
 
 @main.command()
@@ -594,60 +808,48 @@ def enter(target, force_name, force_path):
     If tmux integration is enabled and you're in a tmux session, creates
     a split-pane window instead of spawning a subshell.
     """
-    project_data = _resolve_enter_target(target, force_name, force_path)
+    _enter_command(target, force_name, force_path)
 
-    # Get plugin loader
-    loader = get_plugin_loader()
 
-    # Run pre_enter hooks (observation only)
-    loader.run_hook('pre_enter', project_data)
+def _launch_agent_process(
+    project_root: Path,
+    session_id: str,
+    session_name: Union[str, None],
+    profile_name: str,
+    extra_args: List[str],
+) -> None:
+    """Launch an agent process and update project-local session state."""
+    project_name = _load_local_project_name(project_root)
+    env = _project_context_env(project_root, project_name)
+    env["CL9_SESSION_ID"] = session_id
+    env["CL9_PROFILE"] = profile_name
+    if session_name:
+        env["CL9_SESSION_NAME"] = session_name
 
-    # Validate project
-    project_path = Path(project_data['path'])
+    state = _project_state(project_root)
+    current_cwd = Path.cwd().resolve()
+    cmd = _build_agent_command(project_root, profile_name, extra_args)
+    process_id = state.start_process(session_id, current_cwd, cmd)
 
-    # Check if directory exists
-    if not project_path.exists():
-        click.echo(f"Error: Project directory does not exist: {project_path}", err=True)
-        sys.exit(1)
-
-    # Check if .cl9 directory exists
-    cl9_dir = project_path / ".cl9"
-    if not cl9_dir.exists():
-        click.echo("Error: Project is not initialized (missing .cl9 directory)", err=True)
-        click.echo(f"Run 'cl9 init' in {project_path}", err=True)
-        sys.exit(1)
-
-    # Update last accessed timestamp when entering by a registered name.
-    registered_project = config.get_project(project_data["name"])
-    if registered_project and registered_project["path"] == str(project_path):
-        config.update_last_accessed(project_data["name"])
-
-    # Set up cl9 environment variables
-    env = os.environ.copy()
-    env['CL9_PROJECT'] = project_data["name"]
-    env['CL9_PROJECT_PATH'] = str(project_path)
-    env['CL9_ACTIVE'] = '1'
-
-    # Run on_enter hook - plugin may take over (e.g., tmux)
-    if loader.run_hook('on_enter', project_data, env):
-        # Plugin handled enter (e.g., created tmux window)
-        # Don't spawn subshell, just exit
-        return
-
-    # Default behavior: spawn subshell
-    click.echo(f"Entering project: {project_data['name']}")
-    click.echo(f"Location: {project_path}")
-    click.echo("Type 'exit' or press Ctrl+D to leave project context")
+    click.echo(f"Launching agent in project: {project_name}")
+    click.echo(f"Project root: {project_root}")
+    click.echo(f"Session: {session_id}")
+    if session_name:
+        click.echo(f"Name: {session_name}")
+    click.echo(f"Profile: {profile_name}")
     click.echo()
 
-    # Change to project directory
-    os.chdir(project_path)
+    try:
+        process = _spawn_in_project_shell(current_cwd, env, cmd)
+        state.mark_process_running(process_id, process.pid)
+        exit_code = process.wait()
+    except OSError as exc:
+        state.fail_process_start(process_id, session_id)
+        raise click.ClickException(str(exc)) from exc
 
-    # Get shell from environment, fallback to /bin/sh
-    shell = env.get('SHELL', '/bin/sh')
-
-    # Spawn subshell (this replaces current process)
-    os.execvpe(shell, [shell], env)
+    state.finish_process(process_id, session_id, exit_code)
+    if exit_code != 0:
+        sys.exit(exit_code)
 
 
 @main.group(invoke_without_command=True)
@@ -659,8 +861,9 @@ def agent(ctx):
 
 
 @agent.command("spawn")
-@click.option("--no-continue", is_flag=True, help="Don't use --continue flag.")
-def agent_spawn(no_continue):
+@click.option("--name", "session_name", help="Optional session name.")
+@click.option("-p", "--profile", "profile_name", help="Agent profile name.")
+def agent_spawn(session_name, profile_name):
     """Spawn a Claude Code agent in the current project."""
     project_root = _find_project_root()
     if project_root is None:
@@ -668,27 +871,72 @@ def agent_spawn(no_continue):
         click.echo("Run from within a directory containing .cl9/ (or a subdirectory).", err=True)
         sys.exit(1)
 
-    project_name = _load_local_project_name(project_root)
-
     loader = get_plugin_loader()
     loader.run_hook("pre_agent", project_root)
 
     if loader.run_hook("on_agent", project_root):
         return
 
-    env = os.environ.copy()
-    env["CL9_PROJECT"] = project_name
-    env["CL9_PROJECT_PATH"] = str(project_root)
-    env["CL9_ACTIVE"] = "1"
+    resolved_profile = profile_name or _default_profile_name(project_root)
+    session_id = str(uuid.uuid4())
+    state = _project_state(project_root)
+    state.create_session(session_id, session_name, resolved_profile, "claude-code", Path.cwd())
+    _launch_agent_process(project_root, session_id, session_name, resolved_profile, ["--session-id", session_id])
 
-    cmd = _build_claude_command(project_root, no_continue)
 
-    click.echo(f"Spawning agent in project: {project_name}")
-    click.echo(f"Project root: {project_root}")
-    click.echo(f"Overlay: {project_root / '.cl9' / 'claude'}")
-    click.echo()
+@agent.command("continue")
+@click.argument("target", required=False)
+def agent_continue(target):
+    """Resume an existing session."""
+    project_root = _current_project_path()
+    state = _project_state(project_root)
+    try:
+        session = state.resolve_session_target(target)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
-    os.execvpe("claude", cmd, env)
+    if state.session_has_running_process(session.session_id):
+        raise click.ClickException("Session already has a running process.")
+
+    _launch_agent_process(
+        project_root,
+        session.session_id,
+        session.name,
+        session.profile,
+        ["--resume", session.session_id],
+    )
+
+
+@agent.command("fork")
+@click.argument("target")
+@click.option("--name", "session_name", help="Optional session name.")
+@click.option("-p", "--profile", "profile_name", help="Agent profile name.")
+def agent_fork(target, session_name, profile_name):
+    """Fork an existing session into a new session."""
+    project_root = _current_project_path()
+    state = _project_state(project_root)
+    try:
+        parent = state.resolve_session_target(target)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    child_session_id = str(uuid.uuid4())
+    resolved_profile = profile_name or parent.profile
+    state.create_session(
+        child_session_id,
+        session_name,
+        resolved_profile,
+        "claude-code",
+        Path.cwd(),
+        forked_from_session_id=parent.session_id,
+    )
+    _launch_agent_process(
+        project_root,
+        child_session_id,
+        session_name,
+        resolved_profile,
+        ["--resume", parent.session_id, "--fork-session", "--session-id", child_session_id],
+    )
 
 
 def _write_rendered_file(dest: Path, template_file: Path, content: bytes) -> None:
@@ -698,117 +946,6 @@ def _write_rendered_file(dest: Path, template_file: Path, content: bytes) -> Non
     os.chmod(dest, template_file.stat().st_mode)
 
 
-@main.command("update")
-@click.option("--diff", is_flag=True, help="Show what would change without modifying files.")
-@click.option("--force", is_flag=True, help="Overwrite user-modified files.")
-def update(diff, force):
-    """Update the current project's environment from its template."""
-    project_path = _current_project_path()
-    project_name = _load_local_project_name(project_path)
-    state = load_state(project_path)
-
-    if state is None:
-        click.echo("Error: Project was not initialized with environment tracking.", err=True)
-        click.echo("Reinitialize the project environment or add .cl9/env/state.json.", err=True)
-        sys.exit(1)
-
-    env_type = state["type"]
-    env_spec = _resolve_environment_spec(env_type)
-    variables = build_template_variables(project_name, project_path)
-    tracked_files = dict(state.get("files", {}))
-    added_count = 0
-    updated_count = 0
-    skipped_count = 0
-
-    if diff:
-        click.echo("Dry run - no files will be modified")
-    elif force:
-        click.echo(f"Updating environment (type: {env_type}) [FORCE]")
-    else:
-        click.echo(f"Updating environment (type: {env_type})")
-    click.echo()
-
-    for directory in env_spec.directories:
-        dest_dir = project_path / directory
-        if dest_dir.exists():
-            continue
-        if diff:
-            click.echo(f"  Would add dir:  {directory}/")
-        else:
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            click.echo(f"  Added dir:      {directory}/")
-        added_count += 1
-
-    for template_file in iter_template_files(env_spec.template_path):
-        rel_path = str(template_file.relative_to(env_spec.template_path))
-        dest = project_path / rel_path
-        rendered = render_template_file(template_file, variables)
-        rendered_hash = hash_bytes(rendered)
-        current_hash = hash_file(dest) if dest.exists() and dest.is_file() else None
-        tracked_hash = tracked_files.get(rel_path)
-
-        if dest.exists() and not dest.is_file():
-            label = "Would skip" if diff else "Skipped"
-            click.echo(f"  {label}:       {rel_path} (path is a directory)")
-            skipped_count += 1
-            continue
-
-        if tracked_hash is None:
-            if dest.exists() and not force:
-                label = "Would skip" if diff else "Skipped"
-                click.echo(f"  {label}:       {rel_path} (existing untracked file)")
-                skipped_count += 1
-                continue
-
-            label = "Would add" if diff else "Added"
-            click.echo(f"  {label}:        {rel_path}")
-            if not diff:
-                _write_rendered_file(dest, template_file, rendered)
-                tracked_files[rel_path] = rendered_hash
-            added_count += 1
-            continue
-
-        if current_hash is None:
-            label = "Would add" if diff else "Added"
-            click.echo(f"  {label}:        {rel_path}")
-            if not diff:
-                _write_rendered_file(dest, template_file, rendered)
-                tracked_files[rel_path] = rendered_hash
-            added_count += 1
-            continue
-
-        if current_hash != tracked_hash and not force:
-            label = "Would skip" if diff else "Skipped"
-            click.echo(f"  {label}:       {rel_path} (modified by user)")
-            skipped_count += 1
-            continue
-
-        if current_hash == rendered_hash and current_hash == tracked_hash:
-            tracked_files[rel_path] = tracked_hash
-            continue
-
-        label = "Would update" if diff else "Updated"
-        suffix = " (was modified)" if current_hash != tracked_hash else ""
-        click.echo(f"  {label}:     {rel_path}{suffix}")
-        if not diff:
-            _write_rendered_file(dest, template_file, rendered)
-            tracked_files[rel_path] = rendered_hash
-        updated_count += 1
-
-    if not diff:
-        save_state(project_path, env_type, tracked_files)
-
-    if added_count == 0 and updated_count == 0 and skipped_count == 0:
-        click.echo("Environment is already up to date.")
-        return
-
-    click.echo()
-    if diff:
-        click.echo(f"{updated_count} updates, {added_count} additions, {skipped_count} skips")
-    else:
-        click.echo(f"{updated_count} updated, {added_count} added, {skipped_count} skipped")
-
-
 @main.command()
 @click.argument("shell", type=click.Choice(["bash", "zsh", "fish"], case_sensitive=False))
 def completion(shell):
@@ -816,10 +953,49 @@ def completion(shell):
     _emit_completion_script(shell)
 
 
+@main.command(
+    "run",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+@click.argument("command_argv", nargs=-1, type=click.UNPROCESSED)
+def run_alias(command_argv):
+    """Run a command in the current project environment."""
+    _run_project_command(command_argv)
+
+
 @main.group()
 def project():
-    """Project registry management commands."""
+    """Project management commands."""
     pass
+
+
+@project.command("init")
+@click.argument("path", required=False, default=".")
+@click.option("-n", "--name", "project_name", help="Explicit project name.")
+@click.option("-t", "--type", "env_type", help="Environment type (default: configured default or 'default').")
+@click.option("--force", is_flag=True, help="Re-apply the template to an initialized project.")
+def project_init(path, project_name, env_type, force):
+    """Initialize a project directory."""
+    _init_command(path, project_name, env_type, force)
+
+
+@project.command("enter")
+@click.argument("target", shell_complete=complete_project_names)
+@click.option("-n", "--name", "force_name", is_flag=True, help="Interpret TARGET as a project name.")
+@click.option("-p", "--path", "force_path", is_flag=True, help="Interpret TARGET as a filesystem path.")
+def project_enter(target, force_name, force_path):
+    """Enter a project context."""
+    _enter_command(target, force_name, force_path)
+
+
+@project.command(
+    "run",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+@click.argument("command_argv", nargs=-1, type=click.UNPROCESSED)
+def project_run(command_argv):
+    """Run a command in the project environment."""
+    _run_project_command(command_argv)
 
 
 @project.command("register")
@@ -870,6 +1046,67 @@ def project_prune():
 
     click.echo()
     click.echo(f"Pruned {pruned} project registrations.")
+
+
+@main.group()
+def session():
+    """Project-local session management commands."""
+    pass
+
+
+@session.command("list")
+def session_list():
+    """List sessions for the current project."""
+    project_root = _current_project_path()
+    sessions = _project_state(project_root).list_sessions()
+
+    if not sessions:
+        click.echo("No sessions found.")
+        return
+
+    for entry in sessions:
+        display = entry["name"] or entry["session_id"]
+        click.echo(f"{display}")
+        click.echo(f"  ID: {entry['session_id']}")
+        click.echo(f"  Profile: {entry['profile']}")
+        click.echo(f"  Status: {entry['status']}")
+        click.echo(f"  Last used: {entry['last_used_at']}")
+        if entry["forked_from_session_id"]:
+            click.echo(f"  Forked from: {entry['forked_from_session_id']}")
+        if entry["has_running_process"]:
+            click.echo("  Running: yes")
+        click.echo()
+
+
+@session.command("prune")
+@click.option("--older-than", default="30d", help="Prune idle sessions older than this age (for example 30d).")
+def session_prune(older_than):
+    """Remove old idle sessions from local tracking."""
+    value = older_than.strip().lower()
+    if not value.endswith("d") or not value[:-1].isdigit():
+        raise click.UsageError("--older-than currently expects a whole number of days, e.g. 30d")
+
+    project_root = _current_project_path()
+    pruned = _project_state(project_root).prune_sessions(int(value[:-1]))
+    if pruned == 0:
+        click.echo("No sessions pruned.")
+        return
+    click.echo(f"Pruned {pruned} sessions.")
+
+
+@session.command("delete")
+@click.argument("target")
+@click.option("--force", is_flag=True, help="Delete local tracking even if the session looks active.")
+def session_delete(target, force):
+    """Delete a session from local tracking."""
+    project_root = _current_project_path()
+    state = _project_state(project_root)
+    try:
+        session_target = state.resolve_session_target(target)
+        state.delete_session(session_target.session_id, force=force)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Deleted local tracking for session {session_target.session_id}.")
 
 
 if __name__ == '__main__':
