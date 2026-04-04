@@ -98,12 +98,26 @@ src/cl9/profiles/
     └── mcp.json
 ```
 
-User profiles in `~/.config/cl9/profiles/` override or extend built-ins.
+Additional user-installed profiles live in:
+
+```text
+~/.cl9/profiles/
+```
+
+There is no dedicated `cl9 profile` management command. Profiles are documented and selected by `cl9`, but they are installed and organized as directories on disk.
 
 Profiles may include:
 - `CLAUDE.md` - System prompt / instructions
 - `settings.json` - Tool-specific settings
 - `mcp.json` - MCP server configuration
+
+When a profile is used, `cl9` materializes a project-local working copy under:
+
+```text
+.cl9/profiles/<name>/
+```
+
+This working copy is runtime state. It may be mutated by the running agent or by `cl9` itself. Users should treat it as managed state rather than as the source of truth.
 
 The profile is recorded with the session and reused on `continue`.
 
@@ -204,11 +218,11 @@ Resolution order for `--type <name>`:
 ### Profiles
 
 Resolution order for `--profile <name>`:
-1. Project-local profiles: `.cl9/profiles/<name>/`
-2. User profiles: `~/.config/cl9/profiles/<name>/`
+1. Project-local working copy: `.cl9/profiles/<name>/`
+2. User-installed profile: `~/.cl9/profiles/<name>/`
 3. Built-in profiles: `<cl9-package>/profiles/<name>/`
 
-Project-local profiles allow per-project customization without polluting global config.
+Project-local profiles are instantiated working copies. User-installed profiles and built-in profiles are source material.
 
 ## Project Configuration
 
@@ -228,11 +242,13 @@ When `cl9 agent spawn` is called without `--profile`, it uses:
 
 ### Profile Layout and Compatibility
 
-New projects use:
+New projects use project-local working copies under:
 
 ```text
 .cl9/profiles/default/
 ```
+
+Built-in profiles are documented by cl9 itself. Additional user profiles are installed in `~/.cl9/profiles/`.
 
 There is no compatibility goal for older `.cl9/claude/` layouts. Existing projects are expected to adopt the new structure by re-running:
 
@@ -289,11 +305,12 @@ Later versions may add safe cleanup or synchronization with Claude's global stat
 - `--force` for rare template re-application, no incremental update complexity
 - Extensible to future tools (Copilot, Codex)
 - Profile recorded with session enables consistent `continue`
+- No dedicated profile-management CLI is required
 
 ### Negative
 
 - Two catalogs to understand (templates + profiles)
-- Profile resolution has multiple layers (project → user → built-in)
+- Profile resolution has multiple layers (project working copy → user-installed → built-in)
 - Session portability remains a limitation
 - `init --force` is intentionally destructive
 
@@ -303,3 +320,4 @@ Later versions may add safe cleanup or synchronization with Claude's global stat
 - Per-session profiles over dynamic profile switching mid-session
 - Accept session portability limitation for now
 - Clean break over compatibility with earlier experimental project layouts
+- Filesystem conventions over a dedicated profile-management subcommand
