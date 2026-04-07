@@ -24,6 +24,7 @@ class SessionTarget:
     session_id: str
     name: Optional[str]
     profile: str
+    metadata: Optional[dict] = None
 
 
 class ProjectState:
@@ -291,6 +292,15 @@ class ProjectState:
             ).fetchone()
             return dict(row) if row else None
 
+    def _parse_metadata(self, metadata_json: Optional[str]) -> Optional[dict]:
+        """Parse metadata JSON string, returning None on failure."""
+        if not metadata_json:
+            return None
+        try:
+            return json.loads(metadata_json)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
     def resolve_session_target(self, target: Optional[str]) -> SessionTarget:
         """Resolve a session target pragmatically."""
         self.reconcile_processes()
@@ -299,7 +309,7 @@ class ProjectState:
             with self._connect() as conn:
                 row = conn.execute(
                     """
-                    SELECT session_id, name, profile
+                    SELECT session_id, name, profile, metadata_json
                     FROM agent_sessions
                     ORDER BY last_used_at DESC, created_at DESC
                     LIMIT 1
@@ -310,12 +320,13 @@ class ProjectState:
                         session_id=row["session_id"],
                         name=row["name"],
                         profile=row["profile"],
+                        metadata=self._parse_metadata(row["metadata_json"]),
                     )
             raise ValueError("No sessions found.")
 
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT session_id, name, profile FROM agent_sessions WHERE session_id = ?",
+                "SELECT session_id, name, profile, metadata_json FROM agent_sessions WHERE session_id = ?",
                 (value,),
             ).fetchone()
             if row:
@@ -323,10 +334,11 @@ class ProjectState:
                     session_id=row["session_id"],
                     name=row["name"],
                     profile=row["profile"],
+                    metadata=self._parse_metadata(row["metadata_json"]),
                 )
 
             rows = conn.execute(
-                "SELECT session_id, name, profile FROM agent_sessions WHERE name = ?",
+                "SELECT session_id, name, profile, metadata_json FROM agent_sessions WHERE name = ?",
                 (value,),
             ).fetchall()
             if len(rows) == 1:
@@ -335,6 +347,7 @@ class ProjectState:
                     session_id=row["session_id"],
                     name=row["name"],
                     profile=row["profile"],
+                    metadata=self._parse_metadata(row["metadata_json"]),
                 )
             if len(rows) > 1:
                 raise ValueError(f"Session name '{value}' is ambiguous.")
