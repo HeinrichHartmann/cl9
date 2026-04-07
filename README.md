@@ -6,15 +6,24 @@ Projects are self-contained workspaces where everything relevant to a context li
 
 ## Installation
 
+### From GitHub (Recommended)
+
+```bash
+# Install from main branch
+uv tool install git+https://github.com/HeinrichHartmann/cl9
+
+# Upgrade to latest
+uv tool install --upgrade git+https://github.com/HeinrichHartmann/cl9
+```
+
+### Local Development
+
 ```bash
 # From this checkout
 make install
 
-# Local development install
-uv tool install --force --reinstall ~/p-workbench/src/cl9
-
-# From GitHub
-uv tool install git+https://github.com/username/cl9
+# Or manually with uv
+uv tool install --force --reinstall .
 ```
 
 ## Development
@@ -277,7 +286,18 @@ Profiles are resolved from:
 
 There is no separate `cl9 profile` command. Built-in profiles are documented by `cl9`, and additional profiles are installed by placing directories under `~/.cl9/profiles/`.
 
+Shipped profiles currently include:
+- `default` - general-purpose Claude profile with a rich status line
+- `codex` - implementation-focused profile with the same status line structure and a more execution-oriented prompt
+
 When a profile is used, `cl9` materializes a working copy in `.cl9/profiles/<name>/`. That project-local copy is managed state. It may be mutated by the agent or by `cl9` and should not be edited by the user directly.
+
+Additional Claude arguments can be passed through after `--`, for example:
+
+```bash
+cl9 agent spawn -- --model sonnet
+cl9 agent continue latest -- --model opus
+```
 
 Claude is launched with project-local profile files layered on top of user-level Claude settings:
 
