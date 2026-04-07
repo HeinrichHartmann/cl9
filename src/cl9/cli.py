@@ -12,6 +12,7 @@ from typing import List, Tuple, Union
 import click
 from click.shell_completion import CompletionItem
 
+from .adapters import get_adapter_for_profile
 from .config import config
 from .environments import (
     apply_environment,
@@ -25,7 +26,7 @@ from .environments import (
     save_state,
 )
 from .plugins import PluginLoader
-from .profiles import builtin_profile, resolve_profile
+from .profiles import ProfileSpec, builtin_profile, resolve_profile
 from .sessions import ProjectState
 
 
@@ -318,29 +319,13 @@ def _sync_project_files(project_path: Path, project_name: str, env_type: str, di
     return changed
 
 
-def _build_agent_command(project_root: Path, profile_name: str, extra_args: List[str]) -> List[str]:
-    """Build the Claude Code command using the resolved profile."""
+def _resolve_agent_profile(project_root: Path, profile_name: str) -> ProfileSpec:
+    """Materialize and resolve a profile, returning the ProfileSpec."""
     _materialize_profile(project_root, profile_name)
     profile = resolve_profile(profile_name, project_root, config.profiles_dir)
     if profile is None:
         raise click.ClickException(f"Profile '{profile_name}' was not found.")
-
-    cmd = ["claude", "--setting-sources", "user"]
-
-    claude_md = profile.claude_md
-    if claude_md.is_file():
-        cmd.extend(["--append-system-prompt-file", str(claude_md.resolve())])
-
-    settings_file = profile.settings_json
-    if settings_file.is_file():
-        cmd.extend(["--settings", str(settings_file.resolve())])
-
-    mcp_file = profile.mcp_json
-    if mcp_file.is_file():
-        cmd.extend(["--mcp-config", str(mcp_file.resolve())])
-
-    cmd.extend(extra_args)
-    return cmd
+    return profile
 
 
 def _shell_executable(env: dict) -> str:
@@ -681,6 +666,12 @@ def man(ctx):
         "",
         "SEE ALSO",
         "    cl9 <command> --help",
+        "",
+        "AUTHOR",
+        "    This tool is provided to you by Heinrich Hartmann under the MIT license.",
+        "    The core repository is at https://github.com/HeinrichHartmann/cl9",
+        "    PRs are open. Don't hesitate to open issues for feature requests or bugs",
+        "    you encounter.",
     ])
 
     click.echo("\n".join(lines))
@@ -815,20 +806,20 @@ def _launch_agent_process(
     project_root: Path,
     session_id: str,
     session_name: Union[str, None],
-    profile_name: str,
-    extra_args: List[str],
+    profile: ProfileSpec,
+    cmd: List[str],
 ) -> None:
     """Launch an agent process and update project-local session state."""
     project_name = _load_local_project_name(project_root)
     env = _project_context_env(project_root, project_name)
     env["CL9_SESSION_ID"] = session_id
-    env["CL9_PROFILE"] = profile_name
+    env["CL9_PROFILE"] = profile.name
+    env["CL9_TOOL"] = profile.tool
     if session_name:
         env["CL9_SESSION_NAME"] = session_name
 
     state = _project_state(project_root)
     current_cwd = Path.cwd().resolve()
-    cmd = _build_agent_command(project_root, profile_name, extra_args)
     process_id = state.start_process(session_id, current_cwd, cmd)
 
     click.echo(f"Launching agent in project: {project_name}")
@@ -836,7 +827,8 @@ def _launch_agent_process(
     click.echo(f"Session: {session_id}")
     if session_name:
         click.echo(f"Name: {session_name}")
-    click.echo(f"Profile: {profile_name}")
+    click.echo(f"Profile: {profile.name}")
+    click.echo(f"Tool: {profile.tool}")
     click.echo()
 
     try:
@@ -863,8 +855,13 @@ def agent(ctx):
 @agent.command("spawn")
 @click.option("--name", "session_name", help="Optional session name.")
 @click.option("-p", "--profile", "profile_name", help="Agent profile name.")
-def agent_spawn(session_name, profile_name):
-    """Spawn a Claude Code agent in the current project."""
+@click.argument("agent_args", nargs=-1, type=click.UNPROCESSED)
+def agent_spawn(session_name, profile_name, agent_args):
+    """Spawn an agent in the current project.
+
+    The agent tool (Claude Code, Codex, etc.) is determined by the profile's
+    manifest. Use --profile to select a different profile than the default.
+    """
     project_root = _find_project_root()
     if project_root is None:
         click.echo("Error: Not inside a cl9 project.", err=True)
@@ -877,16 +874,35 @@ def agent_spawn(session_name, profile_name):
     if loader.run_hook("on_agent", project_root):
         return
 
-    resolved_profile = profile_name or _default_profile_name(project_root)
+    resolved_profile_name = profile_name or _default_profile_name(project_root)
+    profile = _resolve_agent_profile(project_root, resolved_profile_name)
+    adapter = get_adapter_for_profile(profile)
+
     session_id = str(uuid.uuid4())
+    launch_spec = adapter.build_spawn_command(profile, session_id, list(agent_args))
+
     state = _project_state(project_root)
-    state.create_session(session_id, session_name, resolved_profile, "claude-code", Path.cwd())
-    _launch_agent_process(project_root, session_id, session_name, resolved_profile, ["--session-id", session_id])
+    state.create_session(
+        session_id,
+        session_name,
+        resolved_profile_name,
+        profile.tool,
+        Path.cwd(),
+    )
+
+    _launch_agent_process(
+        project_root,
+        session_id,
+        session_name,
+        profile,
+        launch_spec.command,
+    )
 
 
 @agent.command("continue")
 @click.argument("target", required=False)
-def agent_continue(target):
+@click.argument("agent_args", nargs=-1, type=click.UNPROCESSED)
+def agent_continue(target, agent_args):
     """Resume an existing session."""
     project_root = _current_project_path()
     state = _project_state(project_root)
@@ -898,12 +914,21 @@ def agent_continue(target):
     if state.session_has_running_process(session.session_id):
         raise click.ClickException("Session already has a running process.")
 
+    profile = _resolve_agent_profile(project_root, session.profile)
+    adapter = get_adapter_for_profile(profile)
+
+    # For tools like Codex, we need the tool_session_id from session metadata
+    tool_session_id = session.metadata.get("tool_session_id") if session.metadata else None
+    launch_spec = adapter.build_continue_command(
+        profile, session.session_id, tool_session_id, list(agent_args)
+    )
+
     _launch_agent_process(
         project_root,
         session.session_id,
         session.name,
-        session.profile,
-        ["--resume", session.session_id],
+        profile,
+        launch_spec.command,
     )
 
 
@@ -911,7 +936,8 @@ def agent_continue(target):
 @click.argument("target")
 @click.option("--name", "session_name", help="Optional session name.")
 @click.option("-p", "--profile", "profile_name", help="Agent profile name.")
-def agent_fork(target, session_name, profile_name):
+@click.argument("agent_args", nargs=-1, type=click.UNPROCESSED)
+def agent_fork(target, session_name, profile_name, agent_args):
     """Fork an existing session into a new session."""
     project_root = _current_project_path()
     state = _project_state(project_root)
@@ -920,22 +946,33 @@ def agent_fork(target, session_name, profile_name):
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
+    resolved_profile_name = profile_name or parent.profile
+    profile = _resolve_agent_profile(project_root, resolved_profile_name)
+    adapter = get_adapter_for_profile(profile)
+
     child_session_id = str(uuid.uuid4())
-    resolved_profile = profile_name or parent.profile
+
+    # For tools like Codex, we need the parent's tool_session_id
+    parent_tool_session_id = parent.metadata.get("tool_session_id") if parent.metadata else None
+    launch_spec = adapter.build_fork_command(
+        profile, parent.session_id, child_session_id, parent_tool_session_id, list(agent_args)
+    )
+
     state.create_session(
         child_session_id,
         session_name,
-        resolved_profile,
-        "claude-code",
+        resolved_profile_name,
+        profile.tool,
         Path.cwd(),
         forked_from_session_id=parent.session_id,
     )
+
     _launch_agent_process(
         project_root,
         child_session_id,
         session_name,
-        resolved_profile,
-        ["--resume", parent.session_id, "--fork-session", "--session-id", child_session_id],
+        profile,
+        launch_spec.command,
     )
 
 
