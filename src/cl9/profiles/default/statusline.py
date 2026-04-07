@@ -60,6 +60,38 @@ def context_color(used_pct: int) -> str:
     return GREEN
 
 
+def to_int(value: object) -> int:
+    """Convert a statusline numeric field to int safely."""
+    if value in (None, ""):
+        return 0
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def context_percentage(context: dict) -> int:
+    """Return a robust context percentage for Claude payloads."""
+    used_pct = to_int(context.get("used_percentage"))
+    if used_pct > 0:
+        return min(100, used_pct)
+
+    window_size = to_int(context.get("context_window_size"))
+    current_usage = context.get("current_usage") or {}
+    if window_size <= 0 or not isinstance(current_usage, dict):
+        return max(0, min(100, used_pct))
+
+    used_tokens = (
+        to_int(current_usage.get("input_tokens"))
+        + to_int(current_usage.get("cache_creation_input_tokens"))
+        + to_int(current_usage.get("cache_read_input_tokens"))
+    )
+    if used_tokens <= 0:
+        return max(0, min(100, used_pct))
+
+    return min(100, int((used_tokens * 100) / window_size))
+
+
 def main() -> int:
     """Render the status line from Claude Code JSON input."""
     try:
@@ -72,8 +104,8 @@ def main() -> int:
     model = data.get("model", {}).get("display_name", "Claude")
     session = data.get("session_name") or profile
     context = data.get("context_window", {})
-    used_pct = int(context.get("used_percentage", 0) or 0)
-    window_size = int(context.get("context_window_size", 0) or 0)
+    used_pct = context_percentage(context)
+    window_size = to_int(context.get("context_window_size"))
     cost = float(data.get("cost", {}).get("total_cost_usd", 0) or 0)
 
     project_text = color(f"[{project}]", CYAN)
