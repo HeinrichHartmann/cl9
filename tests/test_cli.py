@@ -174,6 +174,7 @@ class CliTests(unittest.TestCase):
                 ".cl9/profiles/default/CLAUDE.md",
                 ".cl9/profiles/default/settings.json",
                 ".cl9/profiles/default/statusline.py",
+                ".cl9/profiles/default/manifest.json",
             },
         )
         self.assertIsNone(self.test_config.get_project("demo"))
@@ -197,6 +198,7 @@ class CliTests(unittest.TestCase):
                 ".cl9/profiles/default/CLAUDE.md",
                 ".cl9/profiles/default/settings.json",
                 ".cl9/profiles/default/statusline.py",
+                ".cl9/profiles/default/manifest.json",
             },
             set(self._read_state(project_dir)["files"]),
         )
@@ -374,6 +376,24 @@ class CliTests(unittest.TestCase):
         self.assertIn("# careful agent-user-profile", materialized.read_text())
         self.assertIn(str(materialized.resolve()), captured["argv"][2])
 
+    def test_agent_spawn_materializes_builtin_codex_profile(self):
+        project_dir = self.work_dir / "agent-codex-profile"
+        project_dir.mkdir()
+        self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", "minimal"])
+        self._chdir(project_dir)
+
+        with patch.object(cli_module.uuid, "uuid4", return_value=uuid.UUID("abababab-abab-abab-abab-abababababab")):
+            result, captured = self._invoke_agent(["agent", "spawn", "--profile", "codex"])
+
+        self.assertEqual(result.exit_code, 0)
+        materialized_dir = project_dir / ".cl9" / "profiles" / "codex"
+        self.assertTrue((materialized_dir / "INSTRUCTIONS.md").exists())
+        self.assertTrue((materialized_dir / "manifest.json").exists())
+        self.assertEqual(captured["env"]["CL9_PROFILE"], "codex")
+        self.assertEqual(captured["env"]["CL9_TOOL"], "codex")
+        # Codex adapter uses --instructions flag for INSTRUCTIONS.md
+        self.assertIn(str((materialized_dir / "INSTRUCTIONS.md").resolve()), captured["argv"][2])
+
     def test_agent_spawn_errors_outside_project(self):
         outside_dir = self.work_dir / "outside"
         outside_dir.mkdir()
@@ -443,6 +463,37 @@ class CliTests(unittest.TestCase):
         self.assertIn("Opus", result.stdout)
         self.assertIn("58%", result.stdout)
         self.assertIn("200k", result.stdout)
+
+    def test_default_statusline_falls_back_to_current_usage_for_context(self):
+        script_path = Path(cli_module.__file__).parent / "profiles" / "default" / "statusline.py"
+        payload = json.dumps(
+            {
+                "model": {"display_name": "Sonnet"},
+                "context_window": {
+                    "used_percentage": 0,
+                    "context_window_size": 200000,
+                    "current_usage": {
+                        "input_tokens": 60000,
+                        "cache_creation_input_tokens": 20000,
+                        "cache_read_input_tokens": 20000,
+                        "output_tokens": 5000,
+                    },
+                },
+            }
+        )
+        env = os.environ.copy()
+        env["CL9_PROJECT"] = "demo"
+
+        result = subprocess.run(
+            [sys.executable, str(script_path)],
+            input=payload,
+            text=True,
+            capture_output=True,
+            check=True,
+            env=env,
+        )
+
+        self.assertIn("50%", result.stdout)
 
     def test_project_register_adds_initialized_project_to_registry(self):
         project_dir = self.work_dir / "register-me"
