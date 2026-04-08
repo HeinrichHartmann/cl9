@@ -7,10 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .mounts import MOUNTS_DIR
 
 BUILTIN_DIR = Path(__file__).parent / "profiles"
 USER_PROFILES_DIR = Path.home() / ".cl9" / "profiles"
-MOUNTS_DIR = Path.home() / ".cl9" / "mounts"
 
 DEFAULT_MANIFEST: Dict[str, Any] = {
     "tool": "claude",

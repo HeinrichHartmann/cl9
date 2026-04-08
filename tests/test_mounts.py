@@ -170,6 +170,18 @@ class MountsTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             mounts_module.add_mount("/nonexistent/path/that/should/not/exist", name="broken")
 
+    def test_add_mount_rejects_path_traversal_name(self):
+        source = _init_bare_profile_repo(self.base / "upstream")
+        for bad in ("../escape", "foo/bar", "..", ".", ".hidden", "", "a\\b"):
+            with self.assertRaises(ValueError, msg=f"name={bad!r}"):
+                mounts_module.add_mount(str(source), name=bad)
+        # The clone must not have leaked anywhere outside MOUNTS_DIR.
+        self.assertFalse((self.base / "escape").exists())
+
+    def test_remove_mount_rejects_path_traversal_name(self):
+        with self.assertRaises(ValueError):
+            mounts_module.remove_mount("../escape")
+
     def test_list_mounts_empty(self):
         self.assertEqual(mounts_module.list_mounts(), [])
 

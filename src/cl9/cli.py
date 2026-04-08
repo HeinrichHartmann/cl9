@@ -1367,7 +1367,7 @@ def mount_list():
 
 @mount.command("update")
 @click.argument("name", required=False)
-def mount_update_cmd(name):
+def mount_update(name):
     """Pull updates for a single mount or all mounts."""
     if name:
         targets = [name]
@@ -1389,7 +1389,7 @@ def mount_update_cmd(name):
 
 @mount.command("remove")
 @click.argument("name")
-def mount_remove_cmd(name):
+def mount_remove(name):
     """Remove a mount (deletes the clone)."""
     try:
         remove_mount(name)

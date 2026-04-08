@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from .profiles import MOUNTS_DIR
+MOUNTS_DIR = Path.home() / ".cl9" / "mounts"
 
 
 @dataclass(frozen=True)
@@ -37,13 +37,11 @@ def parse_mount_spec(spec: str) -> Tuple[str, Optional[str]]:
     """Split a mount spec into (repo, ref).
 
     The syntax is ``<repo>[@<ref>]``, following the Go modules / pip
-    convention. Because SSH URLs contain their own ``@`` (as in
-    ``git@github.com:foo/bar``), we split on the **last** ``@`` and only
-    treat the trailing segment as a ref if it does not look like part of an
-    SSH URL (i.e. does not contain ``/`` or ``:``... actually, refs can
-    contain ``/`` — see ``feature/x``). The real disambiguator is that a
-    ref never contains ``:``: SSH URLs use ``user@host:path``, so an ``@``
-    followed by a segment containing ``:`` is part of the URL, not a ref.
+    convention. We split on the last ``@`` in the spec, and only treat
+    its trailing segment as a ref if that segment does not contain
+    ``:``. SSH URLs use ``user@host:path``, so an ``@`` whose tail
+    contains ``:`` belongs to the URL, not a ref. Git branch and tag
+    names cannot contain ``:``, so this is sufficient to disambiguate.
 
     Examples:
         parse_mount_spec("/tmp/repo")                      -> ("/tmp/repo", None)
@@ -78,6 +76,24 @@ def infer_mount_name(git_url: str) -> str:
     elif ":" in url:
         url = url.rsplit(":", 1)[-1]
     return url or "mount"
+
+
+def _validate_mount_name(name: str) -> None:
+    """Reject mount names that could escape MOUNTS_DIR or surprise the user.
+
+    Mount names become a single directory entry under ``~/.cl9/mounts/``.
+    Any path separator, parent reference, or hidden-file prefix is rejected
+    so that ``cl9 mount add ... --name <evil>`` cannot write outside the
+    mounts directory.
+    """
+    if not name:
+        raise ValueError("Mount name must not be empty.")
+    if name in (".", ".."):
+        raise ValueError(f"Mount name '{name}' is not allowed.")
+    if name.startswith("."):
+        raise ValueError(f"Mount name '{name}' must not start with '.'.")
+    if "/" in name or "\\" in name or "\x00" in name:
+        raise ValueError(f"Mount name '{name}' must not contain path separators.")
 
 
 def _run_git(args: List[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
@@ -158,7 +174,8 @@ def add_mount(spec: str, name: Optional[str] = None) -> MountInfo:
     Raises RuntimeError if git clone or checkout fails.
     """
     repo, ref = parse_mount_spec(spec)
-    mount_name = name or infer_mount_name(repo)
+    mount_name = name if name is not None else infer_mount_name(repo)
+    _validate_mount_name(mount_name)
     dest = MOUNTS_DIR / mount_name
 
     if dest.exists():
@@ -214,7 +231,9 @@ def update_mount(name: str) -> MountInfo:
             _run_git(["fetch", "--depth", "1", "origin"], cwd=info.path)
             _run_git(["reset", "--hard", "FETCH_HEAD"], cwd=info.path)
         else:
-            _run_git(["fetch", "origin"], cwd=info.path)
+            # ``--tags --force`` ensures a tag that has been moved upstream
+            # actually moves locally; without it, git keeps the old tag.
+            _run_git(["fetch", "--tags", "--force", "origin"], cwd=info.path)
             # Prefer origin/<ref> if it exists (branch case); fall back to
             # <ref> itself (tag or SHA).
             try:
@@ -237,6 +256,7 @@ def update_mount(name: str) -> MountInfo:
 
 def remove_mount(name: str) -> None:
     """Delete a mount directory. Raises ValueError if not found."""
+    _validate_mount_name(name)
     mount_dir = MOUNTS_DIR / name
     if not mount_dir.is_dir():
         raise ValueError(f"Mount '{name}' not found.")
