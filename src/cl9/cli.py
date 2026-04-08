@@ -868,6 +868,30 @@ def _run_spawn_pipeline(
     return profile, runtime_dir
 
 
+def _read_last_prompt(transcript: Path) -> Optional[str]:
+    """Return the lastPrompt text from a Claude transcript, or None."""
+    try:
+        with open(transcript, "rb") as fh:
+            # Scan the last ~4 KB for the last-prompt entry
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 4096))
+            tail = fh.read().decode("utf-8", errors="replace")
+        for line in reversed(tail.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                if obj.get("type") == "last-prompt":
+                    return obj.get("lastPrompt")
+            except (json.JSONDecodeError, AttributeError):
+                continue
+    except OSError:
+        pass
+    return None
+
+
 def _claude_transcript_path(session_cwd: Path, session_id: str) -> Path:
     """Return the path claude uses to store the session transcript.
 
@@ -887,6 +911,7 @@ def _launch_agent_process(
     runtime_dir: Path,
     cmd: List[str],
     launch_cwd: Union[Path, None] = None,
+    verbose: bool = False,
 ) -> None:
     """Launch an agent process and update project-local session state."""
     env = os.environ.copy()
@@ -912,6 +937,9 @@ def _launch_agent_process(
         click.echo(f"Name: {session_name}")
     click.echo(f"Profile: {profile.name}")
     click.echo(f"Runtime: {runtime_dir}")
+    if verbose:
+        click.echo(f"CWD:     {current_cwd}")
+        click.echo(f"Command: {' '.join(cmd)}")
     click.echo()
 
     try:
@@ -938,8 +966,9 @@ def agent(ctx):
 @agent.command("spawn")
 @click.option("--name", "session_name", help="Optional session name.")
 @click.option("-p", "--profile", "profile_name", help="Agent profile name.")
+@click.option("-v", "--verbose", is_flag=True, help="Print the full launch command before starting.")
 @click.argument("agent_args", nargs=-1, type=click.UNPROCESSED)
-def agent_spawn(session_name, profile_name, agent_args):
+def agent_spawn(session_name, profile_name, verbose, agent_args):
     """Spawn an agent in the current project.
 
     The agent tool (Claude Code, Codex, etc.) is determined by the profile's
@@ -978,13 +1007,14 @@ def agent_spawn(session_name, profile_name, agent_args):
             pass
         raise
 
-    _launch_agent_process(project_root, session_id, session_name, profile, runtime_dir, launch_spec.command)
+    _launch_agent_process(project_root, session_id, session_name, profile, runtime_dir, launch_spec.command, verbose=verbose)
 
 
 @agent.command("continue")
 @click.argument("target", required=False, shell_complete=_complete_session_target)
+@click.option("-v", "--verbose", is_flag=True, help="Print the full launch command before starting.")
 @click.argument("agent_args", nargs=-1, type=click.UNPROCESSED)
-def agent_continue(target, agent_args):
+def agent_continue(target, verbose, agent_args):
     """Resume an existing session."""
     project_root = _current_project_path()
     state = _project_state(project_root)
@@ -1022,7 +1052,7 @@ def agent_continue(target, agent_args):
 
     _launch_agent_process(
         project_root, session.session_id, session.name, profile, runtime_dir,
-        launch_spec.command, launch_cwd=spawn_cwd,
+        launch_spec.command, launch_cwd=spawn_cwd, verbose=verbose,
     )
 
 
@@ -1302,6 +1332,14 @@ def session_list(verbose):
             click.echo(f"  Spawn cwd: {source_cwd}")
             if transcript:
                 click.echo(f"  Transcript: {transcript}  {'[exists]' if transcript_ok else '[MISSING]'}")
+                if transcript_ok:
+                    last_prompt = _read_last_prompt(transcript)
+                    if last_prompt:
+                        # Truncate long prompts to one line
+                        truncated = last_prompt.replace("\n", " ")
+                        if len(truncated) > 120:
+                            truncated = truncated[:117] + "..."
+                        click.echo(f"  Last msg:  {truncated}")
             try:
                 profile = _resolve_agent_profile(entry["profile"])
                 adapter = get_adapter_for_profile(profile)
