@@ -33,6 +33,7 @@ dev = [
 include = [
     "src/cl9/environments/**/*",
     "src/cl9/profiles/**/*",
+    "src/cl9/scaffold/**/*",
 ]
 
 [tool.hatch.build.targets.wheel]

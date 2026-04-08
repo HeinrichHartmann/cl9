@@ -155,13 +155,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("# demo", (project_dir / "README.md").read_text())
         self.assertIn("demo - Agent Memory", (project_dir / "MEMORY.md").read_text())
         self.assertIn('description = "demo - cl9 project environment"', (project_dir / "flake.nix").read_text())
-        self.assertTrue((project_dir / ".cl9" / "profiles" / "default").is_dir())
-        self.assertIn(
-            "This is a cl9-managed project.",
-            (project_dir / ".cl9" / "profiles" / "default" / "CLAUDE.md").read_text(),
-        )
-        self.assertTrue((project_dir / ".cl9" / "profiles" / "default" / "settings.json").exists())
-        self.assertTrue((project_dir / ".cl9" / "profiles" / "default" / "statusline.py").exists())
+        self.assertFalse((project_dir / ".cl9" / "profiles").exists())
         state = self._read_state(project_dir)
         self.assertEqual(state["type"], "default")
         self.assertEqual(
@@ -171,10 +165,6 @@ class CliTests(unittest.TestCase):
                 "MEMORY.md",
                 "flake.nix",
                 ".envrc",
-                ".cl9/profiles/default/CLAUDE.md",
-                ".cl9/profiles/default/settings.json",
-                ".cl9/profiles/default/statusline.py",
-                ".cl9/profiles/default/manifest.json",
             },
         )
         self.assertIsNone(self.test_config.get_project("demo"))
@@ -188,20 +178,39 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertTrue((project_dir / ".cl9" / "config.json").exists())
         self.assertTrue((project_dir / ".cl9" / "env" / "state.json").exists())
-        self.assertTrue((project_dir / ".cl9" / "profiles" / "default" / "CLAUDE.md").exists())
-        self.assertTrue((project_dir / ".cl9" / "profiles" / "default" / "settings.json").exists())
-        self.assertTrue((project_dir / ".cl9" / "profiles" / "default" / "statusline.py").exists())
+        self.assertFalse((project_dir / ".cl9" / "profiles").exists())
         self.assertFalse((project_dir / "README.md").exists())
         self.assertFalse((project_dir / "src").exists())
-        self.assertEqual(
-            {
-                ".cl9/profiles/default/CLAUDE.md",
-                ".cl9/profiles/default/settings.json",
-                ".cl9/profiles/default/statusline.py",
-                ".cl9/profiles/default/manifest.json",
-            },
-            set(self._read_state(project_dir)["files"]),
-        )
+        self.assertEqual(set(self._read_state(project_dir)["files"]), set())
+
+    def test_init_creates_init_example_py(self):
+        project_dir = self.work_dir / "init-example"
+        project_dir.mkdir()
+
+        result = self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", "minimal"])
+
+        self.assertEqual(result.exit_code, 0)
+        example = project_dir / ".cl9" / "init" / "init-example.py"
+        self.assertTrue(example.exists())
+        content = example.read_text()
+        self.assertIn("from cl9 import agent", content)
+        self.assertFalse((project_dir / ".cl9" / "init" / "init.py").exists())
+
+    def test_init_force_rewrites_init_example_but_not_init_py(self):
+        project_dir = self.work_dir / "init-force"
+        project_dir.mkdir()
+        self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", "minimal"])
+
+        # Place a custom init.py and corrupt init-example.py
+        init_dir = project_dir / ".cl9" / "init"
+        (init_dir / "init.py").write_text("# my custom init\n")
+        (init_dir / "init-example.py").write_text("# stale\n")
+
+        self.runner.invoke(cli_module.main, ["init", str(project_dir), "--force"])
+
+        # init-example.py should be restored; init.py must be untouched
+        self.assertIn("from cl9 import agent", (init_dir / "init-example.py").read_text())
+        self.assertEqual((init_dir / "init.py").read_text(), "# my custom init\n")
 
     def test_init_fails_before_writing_when_template_paths_conflict(self):
         project_dir = self.work_dir / "conflict"
@@ -263,22 +272,19 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Launching agent in project: agent-project", result.output)
         self.assertEqual(captured["cwd"], str(nested_dir.resolve()))
-        self.assertEqual(captured["env"]["CL9_PROJECT"], "agent-project")
-        self.assertEqual(captured["env"]["CL9_PROJECT_PATH"], str(project_dir.resolve()))
-        self.assertEqual(captured["env"]["CL9_ACTIVE"], "1")
+        self.assertEqual(captured["env"]["CL9_PROJECT_ROOT"], str(project_dir.resolve()))
+        self.assertEqual(captured["env"]["CL9_PROFILE_NAME"], "default")
         self.assertEqual(captured["env"]["CL9_SESSION_ID"], "12345678-1234-5678-1234-567812345678")
-        self.assertEqual(captured["env"]["CL9_PROFILE"], "default")
+        self.assertEqual(captured["env"]["CL9_SESSION_NAME"], "")
+        self.assertNotIn("CL9_PROJECT", captured["env"])
+        self.assertNotIn("CL9_ACTIVE", captured["env"])
         self.assertTrue(captured["env"]["PATH"].startswith(str((project_dir / "bin").resolve())))
         self.assertEqual(captured["argv"][1], "-ic")
-        self.assertIn("claude --setting-sources user", captured["argv"][2])
-        self.assertIn(
-            str((project_dir / ".cl9" / "profiles" / "default" / "CLAUDE.md").resolve()),
-            captured["argv"][2],
-        )
-        self.assertIn(
-            str((project_dir / ".cl9" / "profiles" / "default" / "settings.json").resolve()),
-            captured["argv"][2],
-        )
+        self.assertIn("claude --bare", captured["argv"][2])
+        self.assertIn("--append-system-prompt-file", captured["argv"][2])
+        self.assertIn("CLAUDE.md", captured["argv"][2])
+        self.assertIn("--settings", captured["argv"][2])
+        self.assertIn("settings.json", captured["argv"][2])
         self.assertIn("--session-id 12345678-1234-5678-1234-567812345678", captured["argv"][2])
 
     def test_agent_without_subcommand_shows_help(self):
@@ -293,6 +299,13 @@ class CliTests(unittest.TestCase):
         self.assertIn("Agent management commands.", result.output)
         self.assertIn("spawn", result.output)
 
+    def _make_transcript(self, session_cwd: Path, session_id: str) -> None:
+        """Create a fake claude transcript file so the resume guardrail passes."""
+        encoded = str(session_cwd.resolve()).replace("/", "-")
+        transcript = Path.home() / ".claude" / "projects" / encoded / f"{session_id}.jsonl"
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text("{}\n")
+
     def test_agent_continue_uses_existing_session(self):
         project_dir = self.work_dir / "agent-continue"
         project_dir.mkdir()
@@ -302,6 +315,7 @@ class CliTests(unittest.TestCase):
         with patch.object(cli_module.uuid, "uuid4", return_value=uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")):
             self._invoke_agent(["agent", "spawn", "--name", "main"])
 
+        self._make_transcript(project_dir, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
         result, captured = self._invoke_agent(["agent", "continue", "main"])
 
         self.assertEqual(result.exit_code, 0)
@@ -329,54 +343,29 @@ class CliTests(unittest.TestCase):
         with patch.object(cli_module.uuid, "uuid4", return_value=uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")):
             self._invoke_agent(["agent", "spawn", "--name", "main"])
 
+        self._make_transcript(project_dir, "ffffffff-ffff-ffff-ffff-ffffffffffff")
         result, captured = self._invoke_agent(["agent", "continue", "main", "--", "--model", "opus"])
 
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--resume ffffffff-ffff-ffff-ffff-ffffffffffff", captured["argv"][2])
         self.assertIn("--model opus", captured["argv"][2])
 
-    def test_agent_spawn_uses_project_local_settings_and_mcp_overrides(self):
-        project_dir = self.work_dir / "agent-overrides"
+    def test_agent_continue_fails_without_transcript(self):
+        project_dir = self.work_dir / "agent-continue-notranscript"
         project_dir.mkdir()
         self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", "minimal"])
-        profile_dir = project_dir / ".cl9" / "profiles" / "default"
-        (profile_dir / "settings.json").write_text('{"model":"opus"}\n')
-        (profile_dir / "mcp.json").write_text('{"mcpServers":{}}\n')
-        self._chdir(project_dir)
-
-        with patch.object(cli_module.uuid, "uuid4", return_value=uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")):
-            _, captured = self._invoke_agent(["agent", "spawn"])
-
-        self.assertIn(str((profile_dir / "CLAUDE.md").resolve()), captured["argv"][2])
-        self.assertIn(str((profile_dir / "settings.json").resolve()), captured["argv"][2])
-        self.assertIn(str((profile_dir / "mcp.json").resolve()), captured["argv"][2])
-
-    def test_agent_spawn_materializes_user_installed_profile_to_project(self):
-        project_dir = self.work_dir / "agent-user-profile"
-        project_dir.mkdir()
-        self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", "minimal"])
-
-        default_profile_dir = project_dir / ".cl9" / "profiles" / "default"
-        for path in default_profile_dir.rglob("*"):
-            if path.is_file():
-                path.unlink()
-        default_profile_dir.rmdir()
-
-        user_profile_dir = self.base / ".cl9" / "profiles" / "careful"
-        user_profile_dir.mkdir(parents=True)
-        (user_profile_dir / "CLAUDE.md").write_text("# careful {{PROJECT_NAME}}\n")
-
         self._chdir(project_dir)
 
         with patch.object(cli_module.uuid, "uuid4", return_value=uuid.UUID("dddddddd-dddd-dddd-dddd-dddddddddddd")):
-            _, captured = self._invoke_agent(["agent", "spawn", "--profile", "careful"])
+            self._invoke_agent(["agent", "spawn", "--name", "main"])
 
-        materialized = project_dir / ".cl9" / "profiles" / "careful" / "CLAUDE.md"
-        self.assertTrue(materialized.exists())
-        self.assertIn("# careful agent-user-profile", materialized.read_text())
-        self.assertIn(str(materialized.resolve()), captured["argv"][2])
+        # No transcript created — guardrail must fire
+        result = self.runner.invoke(cli_module.main, ["agent", "continue", "main"])
 
-    def test_agent_spawn_materializes_builtin_codex_profile(self):
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("transcript not found", result.output)
+
+    def test_agent_spawn_uses_builtin_codex_profile(self):
         project_dir = self.work_dir / "agent-codex-profile"
         project_dir.mkdir()
         self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", "minimal"])
@@ -385,14 +374,14 @@ class CliTests(unittest.TestCase):
         with patch.object(cli_module.uuid, "uuid4", return_value=uuid.UUID("abababab-abab-abab-abab-abababababab")):
             result, captured = self._invoke_agent(["agent", "spawn", "--profile", "codex"])
 
+        sid = "abababab-abab-abab-abab-abababababab"
+        from cl9.runtime import runtime_dir_for
+        expected_instructions = str(runtime_dir_for(project_dir, sid) / "INSTRUCTIONS.md")
+
         self.assertEqual(result.exit_code, 0)
-        materialized_dir = project_dir / ".cl9" / "profiles" / "codex"
-        self.assertTrue((materialized_dir / "INSTRUCTIONS.md").exists())
-        self.assertTrue((materialized_dir / "manifest.json").exists())
-        self.assertEqual(captured["env"]["CL9_PROFILE"], "codex")
-        self.assertEqual(captured["env"]["CL9_TOOL"], "codex")
-        # Codex adapter uses --instructions flag for INSTRUCTIONS.md
-        self.assertIn(str((materialized_dir / "INSTRUCTIONS.md").resolve()), captured["argv"][2])
+        self.assertFalse((project_dir / ".cl9" / "profiles").exists())
+        self.assertEqual(captured["env"]["CL9_PROFILE_NAME"], "codex")
+        self.assertIn(expected_instructions, captured["argv"][2])
 
     def test_agent_spawn_errors_outside_project(self):
         outside_dir = self.work_dir / "outside"
@@ -446,8 +435,8 @@ class CliTests(unittest.TestCase):
             }
         )
         env = os.environ.copy()
-        env["CL9_PROJECT"] = "demo"
-        env["CL9_PROFILE"] = "careful"
+        env["CL9_PROJECT_ROOT"] = "/work/demo"
+        env["CL9_PROFILE_NAME"] = "careful"
 
         result = subprocess.run(
             [sys.executable, str(script_path)],
@@ -482,7 +471,7 @@ class CliTests(unittest.TestCase):
             }
         )
         env = os.environ.copy()
-        env["CL9_PROJECT"] = "demo"
+        env["CL9_PROJECT_ROOT"] = "/work/demo"
 
         result = subprocess.run(
             [sys.executable, str(script_path)],
@@ -602,19 +591,6 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Overwrote:   README.md", result.output)
         self.assertEqual((project_dir / "README.md").read_text(), "# two\n")
-
-    def test_init_force_recreates_default_profile_layout(self):
-        template_dir = self._create_template({"README.md": "# one\n"})
-        project_dir = self.work_dir / "profile-reinit"
-        project_dir.mkdir()
-        self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", str(template_dir)])
-        legacy_dir = project_dir / ".cl9" / "profiles" / "default"
-        (legacy_dir / "CLAUDE.md").unlink()
-
-        result = self.runner.invoke(cli_module.main, ["init", str(project_dir), "--force"])
-
-        self.assertEqual(result.exit_code, 0)
-        self.assertTrue((legacy_dir / "CLAUDE.md").exists())
 
 
 if __name__ == "__main__":

@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
+
+from .runtime import remove_runtime
 
 
 def _now() -> str:
@@ -24,6 +27,7 @@ class SessionTarget:
     session_id: str
     name: Optional[str]
     profile: str
+    source_cwd: Optional[Path] = None
     metadata: Optional[dict] = None
 
 
@@ -305,50 +309,45 @@ class ProjectState:
         """Resolve a session target pragmatically."""
         self.reconcile_processes()
         value = target or "latest"
+
+        def _row_to_target(row) -> "SessionTarget":
+            cwd = Path(row["source_cwd"]) if row["source_cwd"] else None
+            return SessionTarget(
+                session_id=row["session_id"],
+                name=row["name"],
+                profile=row["profile"],
+                source_cwd=cwd,
+                metadata=self._parse_metadata(row["metadata_json"]),
+            )
+
         if value == "latest":
             with self._connect() as conn:
                 row = conn.execute(
                     """
-                    SELECT session_id, name, profile, metadata_json
+                    SELECT session_id, name, profile, source_cwd, metadata_json
                     FROM agent_sessions
                     ORDER BY last_used_at DESC, created_at DESC
                     LIMIT 1
                     """
                 ).fetchone()
                 if row:
-                    return SessionTarget(
-                        session_id=row["session_id"],
-                        name=row["name"],
-                        profile=row["profile"],
-                        metadata=self._parse_metadata(row["metadata_json"]),
-                    )
+                    return _row_to_target(row)
             raise ValueError("No sessions found.")
 
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT session_id, name, profile, metadata_json FROM agent_sessions WHERE session_id = ?",
+                "SELECT session_id, name, profile, source_cwd, metadata_json FROM agent_sessions WHERE session_id = ?",
                 (value,),
             ).fetchone()
             if row:
-                return SessionTarget(
-                    session_id=row["session_id"],
-                    name=row["name"],
-                    profile=row["profile"],
-                    metadata=self._parse_metadata(row["metadata_json"]),
-                )
+                return _row_to_target(row)
 
             rows = conn.execute(
-                "SELECT session_id, name, profile, metadata_json FROM agent_sessions WHERE name = ?",
+                "SELECT session_id, name, profile, source_cwd, metadata_json FROM agent_sessions WHERE name = ?",
                 (value,),
             ).fetchall()
             if len(rows) == 1:
-                row = rows[0]
-                return SessionTarget(
-                    session_id=row["session_id"],
-                    name=row["name"],
-                    profile=row["profile"],
-                    metadata=self._parse_metadata(row["metadata_json"]),
-                )
+                return _row_to_target(rows[0])
             if len(rows) > 1:
                 raise ValueError(f"Session name '{value}' is ambiguous.")
 
@@ -371,7 +370,7 @@ class ProjectState:
             return row is not None
 
     def delete_session(self, session_id: str, force: bool = False) -> None:
-        """Delete a session and its local process history."""
+        """Delete a session, its local process history, and its runtime directory."""
         self.reconcile_processes()
         if self.session_has_running_process(session_id) and not force:
             raise ValueError("Session currently has a running process. Use --force to delete local tracking.")
@@ -382,6 +381,8 @@ class ProjectState:
             conn.commit()
             if cursor.rowcount == 0:
                 raise ValueError(f"Session '{session_id}' not found.")
+
+        remove_runtime(self.project_root, session_id)
 
     def prune_sessions(self, older_than_days: int = 30) -> int:
         """Delete old idle sessions from local tracking."""
@@ -402,7 +403,11 @@ class ProjectState:
                 conn.execute("DELETE FROM agent_processes WHERE session_id = ?", (session_id,))
                 conn.execute("DELETE FROM agent_sessions WHERE session_id = ?", (session_id,))
             conn.commit()
-            return len(session_ids)
+
+        for session_id in session_ids:
+            remove_runtime(self.project_root, session_id)
+
+        return len(session_ids)
 
     @staticmethod
     def _pid_exists(pid: int) -> bool:
