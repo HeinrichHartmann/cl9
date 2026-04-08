@@ -6,12 +6,13 @@ import json
 import os
 import sqlite3
 
-from cl9.runtime import remove_runtime
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
+
+from .runtime import remove_runtime
 
 
 def _now() -> str:
@@ -26,6 +27,7 @@ class SessionTarget:
     session_id: str
     name: Optional[str]
     profile: str
+    source_cwd: Optional[Path] = None
     metadata: Optional[dict] = None
 
 
@@ -307,50 +309,45 @@ class ProjectState:
         """Resolve a session target pragmatically."""
         self.reconcile_processes()
         value = target or "latest"
+
+        def _row_to_target(row) -> "SessionTarget":
+            cwd = Path(row["source_cwd"]) if row["source_cwd"] else None
+            return SessionTarget(
+                session_id=row["session_id"],
+                name=row["name"],
+                profile=row["profile"],
+                source_cwd=cwd,
+                metadata=self._parse_metadata(row["metadata_json"]),
+            )
+
         if value == "latest":
             with self._connect() as conn:
                 row = conn.execute(
                     """
-                    SELECT session_id, name, profile, metadata_json
+                    SELECT session_id, name, profile, source_cwd, metadata_json
                     FROM agent_sessions
                     ORDER BY last_used_at DESC, created_at DESC
                     LIMIT 1
                     """
                 ).fetchone()
                 if row:
-                    return SessionTarget(
-                        session_id=row["session_id"],
-                        name=row["name"],
-                        profile=row["profile"],
-                        metadata=self._parse_metadata(row["metadata_json"]),
-                    )
+                    return _row_to_target(row)
             raise ValueError("No sessions found.")
 
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT session_id, name, profile, metadata_json FROM agent_sessions WHERE session_id = ?",
+                "SELECT session_id, name, profile, source_cwd, metadata_json FROM agent_sessions WHERE session_id = ?",
                 (value,),
             ).fetchone()
             if row:
-                return SessionTarget(
-                    session_id=row["session_id"],
-                    name=row["name"],
-                    profile=row["profile"],
-                    metadata=self._parse_metadata(row["metadata_json"]),
-                )
+                return _row_to_target(row)
 
             rows = conn.execute(
-                "SELECT session_id, name, profile, metadata_json FROM agent_sessions WHERE name = ?",
+                "SELECT session_id, name, profile, source_cwd, metadata_json FROM agent_sessions WHERE name = ?",
                 (value,),
             ).fetchall()
             if len(rows) == 1:
-                row = rows[0]
-                return SessionTarget(
-                    session_id=row["session_id"],
-                    name=row["name"],
-                    profile=row["profile"],
-                    metadata=self._parse_metadata(row["metadata_json"]),
-                )
+                return _row_to_target(rows[0])
             if len(rows) > 1:
                 raise ValueError(f"Session name '{value}' is ambiguous.")
 

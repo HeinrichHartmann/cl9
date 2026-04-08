@@ -8,6 +8,8 @@ See ADR 0009 and the cl9.agent module for the full API reference.
 Entry point: cl9 agent spawn [--name NAME] [--profile PROFILE]
 """
 
+import subprocess  # noqa: F401
+
 from cl9 import agent  # noqa: F401
 
 # ---------------------------------------------------------------------------

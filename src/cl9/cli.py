@@ -182,14 +182,12 @@ def _planned_environment_paths(project_path: Path, env_spec) -> Tuple[List[Path]
     planned_dirs = [
         project_path / ".cl9",
         project_path / ".cl9" / "env",
-        project_path / ".cl9" / "init",
     ]
     planned_dirs.extend(project_path / directory for directory in env_spec.directories)
 
     planned_files = [
         project_path / ".cl9" / "config.json",
         project_path / ".cl9" / "env" / "state.json",
-        project_path / ".cl9" / "init" / "init-example.py",
     ]
 
     for template_file in iter_template_files(env_spec.template_path):
@@ -836,7 +834,10 @@ def _run_spawn_pipeline(
         write_agent_config(runtime_dir)
 
     except BaseException:
-        remove_runtime(project_root, session_id)
+        try:
+            remove_runtime(project_root, session_id)
+        except Exception:
+            pass  # best-effort; original exception takes priority
         raise
 
     return profile, runtime_dir
@@ -937,12 +938,19 @@ def agent_spawn(session_name, profile_name, agent_args):
     profile, runtime_dir = _run_spawn_pipeline(
         project_root, resolved_profile_name, session_id, session_name, spawn_cwd
     )
-    adapter = get_adapter_for_profile(profile)
-    launch_spec = adapter.build_spawn_command(profile, session_id, runtime_dir, list(agent_args))
+    try:
+        adapter = get_adapter_for_profile(profile)
+        launch_spec = adapter.build_spawn_command(profile, session_id, runtime_dir, list(agent_args))
 
-    # Step 7: write session row after successful pipeline
-    state = _project_state(project_root)
-    state.create_session(session_id, session_name, resolved_profile_name, profile.tool, spawn_cwd)
+        # Step 7: write session row after successful pipeline
+        state = _project_state(project_root)
+        state.create_session(session_id, session_name, resolved_profile_name, profile.tool, spawn_cwd)
+    except BaseException:
+        try:
+            remove_runtime(project_root, session_id)
+        except Exception:
+            pass
+        raise
 
     _launch_agent_process(project_root, session_id, session_name, profile, runtime_dir, launch_spec.command)
 
@@ -962,7 +970,11 @@ def agent_continue(target, agent_args):
     if state.session_has_running_process(session.session_id):
         raise click.ClickException("Session already has a running process.")
 
-    spawn_cwd = session.source_cwd or Path.cwd().resolve()
+    if session.source_cwd is None:
+        raise click.ClickException(
+            f"Session '{session.session_id}' is missing source_cwd — possible DB corruption."
+        )
+    spawn_cwd = session.source_cwd
 
     # Resume guardrail: verify claude's transcript exists at the expected path.
     transcript = _claude_transcript_path(spawn_cwd, session.session_id)
@@ -1002,6 +1014,11 @@ def agent_fork(target, session_name, profile_name, agent_args):
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
+    loader = get_plugin_loader()
+    loader.run_hook("pre_agent", project_root)
+    if loader.run_hook("on_agent", project_root):
+        return
+
     resolved_profile_name = profile_name or parent.profile
     child_session_id = str(uuid.uuid4())
     spawn_cwd = Path.cwd().resolve()
@@ -1009,20 +1026,27 @@ def agent_fork(target, session_name, profile_name, agent_args):
     profile, runtime_dir = _run_spawn_pipeline(
         project_root, resolved_profile_name, child_session_id, session_name, spawn_cwd
     )
-    adapter = get_adapter_for_profile(profile)
-    parent_tool_session_id = parent.metadata.get("tool_session_id") if parent.metadata else None
-    launch_spec = adapter.build_fork_command(
-        profile, parent.session_id, child_session_id, parent_tool_session_id, runtime_dir, list(agent_args)
-    )
+    try:
+        adapter = get_adapter_for_profile(profile)
+        parent_tool_session_id = parent.metadata.get("tool_session_id") if parent.metadata else None
+        launch_spec = adapter.build_fork_command(
+            profile, parent.session_id, child_session_id, parent_tool_session_id, runtime_dir, list(agent_args)
+        )
 
-    state.create_session(
-        child_session_id,
-        session_name,
-        resolved_profile_name,
-        profile.tool,
-        spawn_cwd,
-        forked_from_session_id=parent.session_id,
-    )
+        state.create_session(
+            child_session_id,
+            session_name,
+            resolved_profile_name,
+            profile.tool,
+            spawn_cwd,
+            forked_from_session_id=parent.session_id,
+        )
+    except BaseException:
+        try:
+            remove_runtime(project_root, child_session_id)
+        except Exception:
+            pass
+        raise
 
     _launch_agent_process(
         project_root, child_session_id, session_name, profile, runtime_dir, launch_spec.command

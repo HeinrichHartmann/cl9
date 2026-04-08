@@ -45,8 +45,8 @@ def _reset(
     runtime_dir: Path,
     session_id: str,
     session_name: Optional[str] = None,
-    settings_baseline: dict = {},  # noqa: B006
-    mcp_baseline: dict = {},  # noqa: B006
+    settings_baseline: Optional[dict] = None,
+    mcp_baseline: Optional[dict] = None,
 ) -> None:
     """Called by cl9 before running init.py. Not part of the init-script API.
 
@@ -56,8 +56,8 @@ def _reset(
     import cl9.agent as _m  # reference the module itself to assign globals
 
     _m.env = {}
-    _m.settings = dict(settings_baseline)
-    _m.mcp = dict(mcp_baseline)
+    _m.settings = dict(settings_baseline or {})
+    _m.mcp = dict(mcp_baseline or {})
 
     _m.project_root = project_root
     _m.profile_name = profile_name
