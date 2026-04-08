@@ -270,6 +270,13 @@ class CliTests(unittest.TestCase):
         self.assertIn("Agent management commands.", result.output)
         self.assertIn("spawn", result.output)
 
+    def _make_transcript(self, session_cwd: Path, session_id: str) -> None:
+        """Create a fake claude transcript file so the resume guardrail passes."""
+        encoded = str(session_cwd.resolve()).replace("/", "-")
+        transcript = Path.home() / ".claude" / "projects" / encoded / f"{session_id}.jsonl"
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text("{}\n")
+
     def test_agent_continue_uses_existing_session(self):
         project_dir = self.work_dir / "agent-continue"
         project_dir.mkdir()
@@ -279,6 +286,7 @@ class CliTests(unittest.TestCase):
         with patch.object(cli_module.uuid, "uuid4", return_value=uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")):
             self._invoke_agent(["agent", "spawn", "--name", "main"])
 
+        self._make_transcript(project_dir, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
         result, captured = self._invoke_agent(["agent", "continue", "main"])
 
         self.assertEqual(result.exit_code, 0)
@@ -306,11 +314,27 @@ class CliTests(unittest.TestCase):
         with patch.object(cli_module.uuid, "uuid4", return_value=uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")):
             self._invoke_agent(["agent", "spawn", "--name", "main"])
 
+        self._make_transcript(project_dir, "ffffffff-ffff-ffff-ffff-ffffffffffff")
         result, captured = self._invoke_agent(["agent", "continue", "main", "--", "--model", "opus"])
 
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--resume ffffffff-ffff-ffff-ffff-ffffffffffff", captured["argv"][2])
         self.assertIn("--model opus", captured["argv"][2])
+
+    def test_agent_continue_fails_without_transcript(self):
+        project_dir = self.work_dir / "agent-continue-notranscript"
+        project_dir.mkdir()
+        self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", "minimal"])
+        self._chdir(project_dir)
+
+        with patch.object(cli_module.uuid, "uuid4", return_value=uuid.UUID("dddddddd-dddd-dddd-dddd-dddddddddddd")):
+            self._invoke_agent(["agent", "spawn", "--name", "main"])
+
+        # No transcript created — guardrail must fire
+        result = self.runner.invoke(cli_module.main, ["agent", "continue", "main"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("transcript not found", result.output)
 
     def test_agent_spawn_uses_builtin_codex_profile(self):
         project_dir = self.work_dir / "agent-codex-profile"
