@@ -1,10 +1,9 @@
-# {{PROJECT_NAME}}
+# cl9 Project
 
 This is a cl9-managed project.
 
 ## Context
 
-- Root: {{PROJECT_PATH}}
 - Read `MEMORY.md` before starting substantial work.
 - Check `bin/` for project-specific commands before inventing ad hoc workflows.
 
