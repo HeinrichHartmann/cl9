@@ -14,6 +14,7 @@ from cl9.runtime import (
     runtime_dir_for,
     write_agent_config,
 )
+from cl9.sessions import ProjectState
 
 
 class AgentResetTests(unittest.TestCase):
@@ -271,6 +272,51 @@ class RemoveRuntimeTests(unittest.TestCase):
     def test_idempotent_when_runtime_missing(self):
         # Should not raise even if runtime dir was never created
         remove_runtime(self.project_root, "nonexistent-session")
+
+
+class SessionRuntimeLifecycleTests(unittest.TestCase):
+    """session delete and prune remove runtime directories."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.project_root = Path(self.tmpdir.name) / "project"
+        self.project_root.mkdir()
+        self.state = ProjectState(self.project_root)
+
+    def _create_session_with_runtime(self, session_id, name=None):
+        self.state.create_session(session_id, name, "default", "claude", self.project_root)
+        runtime = runtime_dir_for(self.project_root, session_id)
+        runtime.mkdir(parents=True)
+        (runtime / "CLAUDE.md").write_text("# test\n")
+        return runtime
+
+    def test_delete_session_removes_runtime_dir(self):
+        sid = "aaaa-delete"
+        runtime = self._create_session_with_runtime(sid)
+
+        self.state.delete_session(sid)
+
+        self.assertFalse(runtime.exists())
+
+    def test_prune_sessions_removes_runtime_dirs(self):
+        import datetime
+        sid = "bbbb-prune"
+        runtime = self._create_session_with_runtime(sid)
+
+        # Back-date the session so it qualifies for pruning
+        cutoff = (datetime.datetime.now() - datetime.timedelta(days=31)).isoformat()
+        with self.state._connect() as conn:
+            conn.execute(
+                "UPDATE agent_sessions SET last_used_at = ? WHERE session_id = ?",
+                (cutoff, sid),
+            )
+            conn.commit()
+
+        pruned = self.state.prune_sessions(older_than_days=30)
+
+        self.assertEqual(pruned, 1)
+        self.assertFalse(runtime.exists())
 
 
 if __name__ == "__main__":

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+
+from cl9.runtime import remove_runtime
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -371,7 +373,7 @@ class ProjectState:
             return row is not None
 
     def delete_session(self, session_id: str, force: bool = False) -> None:
-        """Delete a session and its local process history."""
+        """Delete a session, its local process history, and its runtime directory."""
         self.reconcile_processes()
         if self.session_has_running_process(session_id) and not force:
             raise ValueError("Session currently has a running process. Use --force to delete local tracking.")
@@ -382,6 +384,8 @@ class ProjectState:
             conn.commit()
             if cursor.rowcount == 0:
                 raise ValueError(f"Session '{session_id}' not found.")
+
+        remove_runtime(self.project_root, session_id)
 
     def prune_sessions(self, older_than_days: int = 30) -> int:
         """Delete old idle sessions from local tracking."""
@@ -402,7 +406,11 @@ class ProjectState:
                 conn.execute("DELETE FROM agent_processes WHERE session_id = ?", (session_id,))
                 conn.execute("DELETE FROM agent_sessions WHERE session_id = ?", (session_id,))
             conn.commit()
-            return len(session_ids)
+
+        for session_id in session_ids:
+            remove_runtime(self.project_root, session_id)
+
+        return len(session_ids)
 
     @staticmethod
     def _pid_exists(pid: int) -> bool:
