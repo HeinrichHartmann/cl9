@@ -21,7 +21,7 @@ from typing import Optional
 # Mutable agent configuration — init.py writes here
 # ---------------------------------------------------------------------------
 
-env: dict = {}       # forwarded into the agent process env at launch
+env: dict[str, str] = {}  # forwarded into the agent process env at launch
 settings: dict = {}  # serialized to <runtime>/settings.json
 mcp: dict = {}       # serialized to <runtime>/mcp.json
 
@@ -44,11 +44,15 @@ def _reset(
     profile_dir: Path,
     runtime_dir: Path,
     session_id: str,
-    session_name: Optional[str],
-    settings_baseline: dict,
-    mcp_baseline: dict,
+    session_name: Optional[str] = None,
+    settings_baseline: dict = {},  # noqa: B006
+    mcp_baseline: dict = {},  # noqa: B006
 ) -> None:
-    """Called by cl9 before running init.py. Not part of the init-script API."""
+    """Called by cl9 before running init.py. Not part of the init-script API.
+
+    Baseline dicts are shallow-copied. Callers must re-read from disk on each
+    spawn; nested sub-dicts would be shared with the caller's object.
+    """
     import cl9.agent as _m  # reference the module itself to assign globals
 
     _m.env = {}

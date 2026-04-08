@@ -19,6 +19,15 @@ from cl9.runtime import (
 class AgentResetTests(unittest.TestCase):
     """cl9.agent._reset isolates state between invocations."""
 
+    def setUp(self):
+        agent._reset(
+            project_root=Path("/tmp/default"),
+            profile_name="default",
+            profile_dir=Path("/tmp/profile"),
+            runtime_dir=Path("/tmp/runtime"),
+            session_id="default-session",
+        )
+
     def _reset(self, **kwargs):
         defaults = dict(
             project_root=Path("/tmp/proj"),
@@ -164,6 +173,17 @@ class MaterializeProfileTests(unittest.TestCase):
         materialize_profile_into_runtime(profile, self.runtime_dir)
 
         self.assertTrue((self.runtime_dir / "sub" / "dir" / "file.txt").exists())
+
+    def test_skip_list_applies_to_top_level_only(self):
+        # A nested settings.json (e.g. an MCP server's config) must NOT be skipped.
+        profile = self._make_profile({
+            "settings.json": '{"top": true}',
+            "sub/settings.json": '{"nested": true}',
+        })
+        materialize_profile_into_runtime(profile, self.runtime_dir)
+
+        self.assertFalse((self.runtime_dir / "settings.json").exists())
+        self.assertTrue((self.runtime_dir / "sub" / "settings.json").exists())
 
 
 class WriteAgentConfigTests(unittest.TestCase):

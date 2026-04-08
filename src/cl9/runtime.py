@@ -25,7 +25,8 @@ def materialize_profile_into_runtime(profile: ProfileSpec, runtime_dir: Path) ->
     for src in sorted(profile.path.rglob("*")):
         if not src.is_file():
             continue
-        if src.name in _SKIP_FILES:
+        rel = src.relative_to(profile.path)
+        if rel.parent == Path(".") and src.name in _SKIP_FILES:
             continue
         dest = runtime_dir / src.relative_to(profile.path)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -39,11 +40,11 @@ def write_agent_config(runtime_dir: Path) -> None:
 
     if agent.settings:
         (runtime_dir / "settings.json").write_text(
-            json.dumps(agent.settings, indent=2, sort_keys=False)
+            json.dumps(agent.settings, indent=2)
         )
     if agent.mcp:
         (runtime_dir / "mcp.json").write_text(
-            json.dumps(agent.mcp, indent=2, sort_keys=False)
+            json.dumps(agent.mcp, indent=2)
         )
 
 
