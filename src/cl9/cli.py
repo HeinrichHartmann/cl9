@@ -34,6 +34,7 @@ from .environments import (
     resolve_environment,
     save_state,
 )
+from .mounts import add_mount, list_mounts, remove_mount, update_mount
 from .plugins import PluginLoader
 from .profiles import ProfileSpec, USER_PROFILES_DIR, list_profiles, resolve_profile
 from .sessions import ProjectState
@@ -1230,17 +1231,18 @@ def profile():
 
 @profile.command("list")
 def profile_list():
-    """List all available profiles (user-local and built-in)."""
+    """List all available profiles (user-local, mounted, and built-in)."""
     profiles = list_profiles()
     if not profiles:
         click.echo("No profiles found.")
         return
     name_w = max(len(p.name) for p, _ in profiles)
     tool_w = max(len(p.tool) for p, _ in profiles)
-    click.echo(f"  {'NAME':<{name_w}}  {'TOOL':<{tool_w}}  SOURCE  PATH")
-    click.echo(f"  {'-'*name_w}  {'-'*tool_w}  ------  ----")
+    source_w = max(len("SOURCE"), max(len(source) for _, source in profiles))
+    click.echo(f"  {'NAME':<{name_w}}  {'TOOL':<{tool_w}}  {'SOURCE':<{source_w}}  PATH")
+    click.echo(f"  {'-'*name_w}  {'-'*tool_w}  {'-'*source_w}  ----")
     for p, source in profiles:
-        click.echo(f"  {p.name:<{name_w}}  {p.tool:<{tool_w}}  {source:<7} {p.path}")
+        click.echo(f"  {p.name:<{name_w}}  {p.tool:<{tool_w}}  {source:<{source_w}}  {p.path}")
 
 
 @profile.command("add")
@@ -1290,6 +1292,110 @@ def profile_update(name, directory):
     dest.unlink()
     dest.symlink_to(src)
     click.echo(f"Updated profile '{name}' → {src}")
+
+
+@main.group(invoke_without_command=True)
+@click.pass_context
+def mount(ctx):
+    """Mount external profile/mcp/skill sources from git repositories.
+
+    Mounts live under ~/.cl9/mounts/<name>/ and may contain profiles/,
+    mcps/, or skills/ subdirectories. Mounted profiles are discoverable
+    by 'cl9 agent spawn' with precedence user → mount → builtin.
+    """
+    if ctx.invoked_subcommand is None:
+        # Default: list mounts (same as `cl9 mount list`)
+        ctx.invoke(mount_list)
+
+
+@mount.command("add")
+@click.argument("spec")
+@click.option("--name", default=None, help="Mount name (defaults to repo basename).")
+def mount_add(spec, name):
+    """Clone a git repository as a mount.
+
+    SPEC is a git repo with an optional trailing ref, in the form
+    <repo>[@<ref>]. The <ref> can be any tree-ish git understands:
+    a branch name, tag, or commit SHA. Following the Go modules and
+    pip conventions, the separator is the last '@' that is not part
+    of an SSH URL.
+
+    \b
+    Examples:
+      cl9 mount add /tmp/my-profiles
+      cl9 mount add /tmp/my-profiles@main
+      cl9 mount add git@github.com:foo/bar@v1.2.3
+      cl9 mount add https://github.com/foo/bar@abc1234
+    """
+    try:
+        info = add_mount(spec, name=name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"Mounted '{info.name}' → {info.path}")
+    if info.origin:
+        click.echo(f"  origin:   {info.origin}")
+    if info.ref:
+        click.echo(f"  ref:      {info.ref}")
+    click.echo(
+        f"  contents: {info.profile_count} profile(s), "
+        f"{info.mcp_count} mcp(s), {info.skill_count} skill(s)"
+    )
+
+
+@mount.command("list")
+def mount_list():
+    """List mounted sources."""
+    mounts = list_mounts()
+    if not mounts:
+        click.echo("No mounts. Use 'cl9 mount add <git-url>' to add one.")
+        return
+    for info in mounts:
+        click.echo(f"{info.name}")
+        if info.origin:
+            click.echo(f"  origin:   {info.origin}")
+        if info.ref:
+            click.echo(f"  ref:      {info.ref}")
+        click.echo(f"  path:     {info.path}")
+        click.echo(
+            f"  contents: {info.profile_count} profile(s), "
+            f"{info.mcp_count} mcp(s), {info.skill_count} skill(s)"
+        )
+
+
+@mount.command("update")
+@click.argument("name", required=False)
+def mount_update_cmd(name):
+    """Pull updates for a single mount or all mounts."""
+    if name:
+        targets = [name]
+    else:
+        targets = [m.name for m in list_mounts()]
+        if not targets:
+            click.echo("No mounts to update.")
+            return
+
+    for target in targets:
+        try:
+            update_mount(target)
+            click.echo(f"Updated '{target}'")
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+        except RuntimeError as exc:
+            click.echo(f"Failed to update '{target}': {exc}", err=True)
+
+
+@mount.command("remove")
+@click.argument("name")
+def mount_remove_cmd(name):
+    """Remove a mount (deletes the clone)."""
+    try:
+        remove_mount(name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Removed mount '{name}'")
 
 
 @main.group()

@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 BUILTIN_DIR = Path(__file__).parent / "profiles"
 USER_PROFILES_DIR = Path.home() / ".cl9" / "profiles"
+MOUNTS_DIR = Path.home() / ".cl9" / "mounts"
 
 DEFAULT_MANIFEST: Dict[str, Any] = {
     "tool": "claude",
@@ -91,16 +92,57 @@ def user_profile(name: str) -> Optional[ProfileSpec]:
     return None
 
 
+def _iter_mount_profile_dirs():
+    """Yield (mount_name, profile_dir) for every profile in every mount."""
+    if not MOUNTS_DIR.is_dir():
+        return
+    for mount in sorted(MOUNTS_DIR.iterdir()):
+        if not mount.is_dir():
+            continue
+        profiles_dir = mount / "profiles"
+        if not profiles_dir.is_dir():
+            continue
+        for profile_dir in sorted(profiles_dir.iterdir()):
+            if profile_dir.is_dir():
+                yield mount.name, profile_dir
+
+
+def mounted_profile(name: str) -> Optional[Tuple[ProfileSpec, str]]:
+    """Resolve a profile from any mount. Returns (spec, mount_name) or None.
+
+    If multiple mounts define the same profile name, the first one wins
+    (mounts are iterated in sorted order by mount directory name).
+    """
+    for mount_name, profile_dir in _iter_mount_profile_dirs():
+        if profile_dir.name == name:
+            resolved_path = profile_dir.resolve()
+            manifest = _load_manifest(resolved_path)
+            return (
+                ProfileSpec(name=name, path=resolved_path, manifest=manifest),
+                mount_name,
+            )
+    return None
+
+
 def resolve_profile(name: str) -> Optional[ProfileSpec]:
-    """Resolve a profile by name: user-local takes precedence over built-in."""
-    return user_profile(name) or builtin_profile(name)
+    """Resolve a profile by name.
+
+    Precedence: user-local → mounted → built-in.
+    """
+    user = user_profile(name)
+    if user:
+        return user
+    mounted = mounted_profile(name)
+    if mounted:
+        return mounted[0]
+    return builtin_profile(name)
 
 
 def list_profiles() -> List[Tuple[ProfileSpec, str]]:
     """Return all available profiles as (ProfileSpec, source) pairs.
 
-    User-local profiles shadow built-ins with the same name.
-    Source is either 'user' or 'builtin'.
+    Precedence is user → mount:<name> → builtin; earlier sources shadow later
+    ones. The source string is 'user', 'mount:<mount-name>', or 'builtin'.
     """
     seen: Dict[str, Tuple[ProfileSpec, str]] = {}
 
@@ -113,6 +155,15 @@ def list_profiles() -> List[Tuple[ProfileSpec, str]]:
                     ProfileSpec(name=name, path=candidate.resolve(), manifest=manifest),
                     "user",
                 )
+
+    for mount_name, profile_dir in _iter_mount_profile_dirs():
+        name = profile_dir.name
+        if name not in seen:
+            manifest = _load_manifest(profile_dir.resolve())
+            seen[name] = (
+                ProfileSpec(name=name, path=profile_dir.resolve(), manifest=manifest),
+                f"mount:{mount_name}",
+            )
 
     for candidate in sorted(BUILTIN_DIR.iterdir()):
         if candidate.is_dir():
