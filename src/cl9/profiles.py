@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 BUILTIN_DIR = Path(__file__).parent / "profiles"
+USER_PROFILES_DIR = Path.home() / ".cl9" / "profiles"
 
 DEFAULT_MANIFEST: Dict[str, Any] = {
     "tool": "claude",
@@ -71,10 +72,56 @@ class ProfileSpec:
 
 
 def builtin_profile(name: str) -> Optional[ProfileSpec]:
-    """Resolve a built-in profile by name only."""
+    """Resolve a built-in profile by name."""
     candidate = BUILTIN_DIR / name
     if candidate.is_dir():
         resolved_path = candidate.resolve()
         manifest = _load_manifest(resolved_path)
         return ProfileSpec(name=name, path=resolved_path, manifest=manifest)
     return None
+
+
+def user_profile(name: str) -> Optional[ProfileSpec]:
+    """Resolve a user-local profile from ~/.cl9/profiles/<name>."""
+    candidate = USER_PROFILES_DIR / name
+    if candidate.is_dir():
+        resolved_path = candidate.resolve()
+        manifest = _load_manifest(resolved_path)
+        return ProfileSpec(name=name, path=resolved_path, manifest=manifest)
+    return None
+
+
+def resolve_profile(name: str) -> Optional[ProfileSpec]:
+    """Resolve a profile by name: user-local takes precedence over built-in."""
+    return user_profile(name) or builtin_profile(name)
+
+
+def list_profiles() -> List[Tuple[ProfileSpec, str]]:
+    """Return all available profiles as (ProfileSpec, source) pairs.
+
+    User-local profiles shadow built-ins with the same name.
+    Source is either 'user' or 'builtin'.
+    """
+    seen: Dict[str, Tuple[ProfileSpec, str]] = {}
+
+    if USER_PROFILES_DIR.is_dir():
+        for candidate in sorted(USER_PROFILES_DIR.iterdir()):
+            if candidate.is_dir():
+                name = candidate.name
+                manifest = _load_manifest(candidate.resolve())
+                seen[name] = (
+                    ProfileSpec(name=name, path=candidate.resolve(), manifest=manifest),
+                    "user",
+                )
+
+    for candidate in sorted(BUILTIN_DIR.iterdir()):
+        if candidate.is_dir():
+            name = candidate.name
+            if name not in seen:
+                manifest = _load_manifest(candidate.resolve())
+                seen[name] = (
+                    ProfileSpec(name=name, path=candidate.resolve(), manifest=manifest),
+                    "builtin",
+                )
+
+    return list(seen.values())

@@ -35,7 +35,7 @@ from .environments import (
     save_state,
 )
 from .plugins import PluginLoader
-from .profiles import ProfileSpec, builtin_profile
+from .profiles import ProfileSpec, USER_PROFILES_DIR, list_profiles, resolve_profile
 from .sessions import ProjectState
 
 
@@ -281,8 +281,8 @@ def _sync_project_files(project_path: Path, project_name: str, env_type: str, di
 
 
 def _resolve_agent_profile(profile_name: str) -> ProfileSpec:
-    """Resolve a built-in profile by name."""
-    profile = builtin_profile(profile_name)
+    """Resolve a profile by name (user-local first, then built-in)."""
+    profile = resolve_profile(profile_name)
     if profile is None:
         raise click.ClickException(f"Profile '{profile_name}' was not found.")
     return profile
@@ -1160,6 +1160,76 @@ def project_prune():
 
     click.echo()
     click.echo(f"Pruned {pruned} project registrations.")
+
+
+@main.group()
+def profile():
+    """Profile management commands."""
+    pass
+
+
+@profile.command("list")
+def profile_list():
+    """List all available profiles (user-local and built-in)."""
+    profiles = list_profiles()
+    if not profiles:
+        click.echo("No profiles found.")
+        return
+    name_w = max(len(p.name) for p, _ in profiles)
+    tool_w = max(len(p.tool) for p, _ in profiles)
+    click.echo(f"  {'NAME':<{name_w}}  {'TOOL':<{tool_w}}  SOURCE  PATH")
+    click.echo(f"  {'-'*name_w}  {'-'*tool_w}  ------  ----")
+    for p, source in profiles:
+        click.echo(f"  {p.name:<{name_w}}  {p.tool:<{tool_w}}  {source:<7} {p.path}")
+
+
+@profile.command("add")
+@click.argument("directory", type=click.Path(exists=True, file_okay=False, resolve_path=True))
+@click.option("--name", default=None, help="Profile name (defaults to directory basename).")
+def profile_add(directory, name):
+    """Register a local profile directory under ~/.cl9/profiles/."""
+    src = Path(directory)
+    profile_name = name or src.name
+
+    if not (src / "manifest.json").is_file():
+        raise click.ClickException(
+            f"'{src}' has no manifest.json — is this a cl9 profile directory?"
+        )
+
+    dest = USER_PROFILES_DIR / profile_name
+    USER_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+
+    if dest.exists() or dest.is_symlink():
+        raise click.ClickException(
+            f"Profile '{profile_name}' already exists at {dest}. "
+            f"Use 'cl9 profile update' to replace it."
+        )
+
+    dest.symlink_to(src)
+    click.echo(f"Added profile '{profile_name}' → {src}")
+
+
+@profile.command("update")
+@click.argument("name")
+@click.argument("directory", type=click.Path(exists=True, file_okay=False, resolve_path=True))
+def profile_update(name, directory):
+    """Replace an existing user-local profile's target directory."""
+    src = Path(directory)
+
+    if not (src / "manifest.json").is_file():
+        raise click.ClickException(
+            f"'{src}' has no manifest.json — is this a cl9 profile directory?"
+        )
+
+    dest = USER_PROFILES_DIR / name
+    if not dest.exists() and not dest.is_symlink():
+        raise click.ClickException(
+            f"Profile '{name}' not found. Use 'cl9 profile add' to register a new one."
+        )
+
+    dest.unlink()
+    dest.symlink_to(src)
+    click.echo(f"Updated profile '{name}' → {src}")
 
 
 @main.group()
