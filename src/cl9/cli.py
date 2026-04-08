@@ -121,6 +121,31 @@ def _project_state(project_path: Path) -> ProjectState:
     return ProjectState(project_path)
 
 
+def _complete_session_target(ctx, param, incomplete):  # noqa: ARG001
+    """Shell completion for session target arguments — returns session names and IDs."""
+    project_root = _find_project_root()
+    if project_root is None:
+        return []
+    try:
+        sessions = _project_state(project_root).list_sessions()
+    except Exception:
+        return []
+
+    items = []
+    for s in sessions:
+        age = s["last_used_at"][:10] if s.get("last_used_at") else ""
+        status = s["status"]
+        profile = s.get("profile", "")
+        detail = f"{profile}  {status}  {age}"
+        sid = s["session_id"]
+        name = s.get("name")
+        if name and name.startswith(incomplete):
+            items.append(CompletionItem(name, help=f"{sid[:8]}  {detail}"))
+        if sid.startswith(incomplete):
+            items.append(CompletionItem(sid, help=detail))
+    return items
+
+
 def _default_profile_name(project_path: Path) -> str:
     """Return the configured default profile name."""
     project_config = _load_local_project_config(project_path)
@@ -956,7 +981,7 @@ def agent_spawn(session_name, profile_name, agent_args):
 
 
 @agent.command("continue")
-@click.argument("target", required=False)
+@click.argument("target", required=False, shell_complete=_complete_session_target)
 @click.argument("agent_args", nargs=-1, type=click.UNPROCESSED)
 def agent_continue(target, agent_args):
     """Resume an existing session."""
@@ -1068,6 +1093,7 @@ def completion(shell):
 
 
 main.add_command(agent_spawn, name="spawn")
+main.add_command(agent_continue, name="continue")
 
 
 @main.command(
