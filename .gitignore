@@ -1,5 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
 # Design review outputs
 REVIEW/
+/REVIEW.md
 
 # Project-local state
 .cl9/
