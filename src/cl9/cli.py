@@ -26,7 +26,7 @@ from .environments import (
     save_state,
 )
 from .plugins import PluginLoader
-from .profiles import ProfileSpec, builtin_profile, resolve_profile
+from .profiles import ProfileSpec, builtin_profile
 from .sessions import ProjectState
 
 
@@ -118,11 +118,6 @@ def _default_profile_name(project_path: Path) -> str:
     return project_config.get("default_profile", "default")
 
 
-def _project_profiles_dir(project_path: Path) -> Path:
-    """Return the project-local profiles directory."""
-    return project_path / ".cl9" / "profiles"
-
-
 def _project_context_env(project_path: Path, project_name: str) -> dict:
     """Build the shared project execution environment."""
     env = os.environ.copy()
@@ -178,15 +173,12 @@ def _planned_environment_paths(project_path: Path, env_spec) -> Tuple[List[Path]
     planned_dirs = [
         project_path / ".cl9",
         project_path / ".cl9" / "env",
-        project_path / ".cl9" / "profiles",
-        project_path / ".cl9" / "profiles" / "default",
     ]
     planned_dirs.extend(project_path / directory for directory in env_spec.directories)
 
     planned_files = [
         project_path / ".cl9" / "config.json",
         project_path / ".cl9" / "env" / "state.json",
-        project_path / ".cl9" / "profiles" / "default" / "CLAUDE.md",
     ]
 
     for template_file in iter_template_files(env_spec.template_path):
@@ -211,43 +203,6 @@ def _fail_on_init_conflicts(project_path: Path, env_spec) -> None:
     sys.exit(1)
 
 
-def _render_default_profile_files(project_path: Path, project_name: str) -> List[Tuple[str, bytes, Path]]:
-    """Render the default project-local profile scaffold."""
-    default_profile = builtin_profile("default")
-    if default_profile is None:
-        raise click.ClickException("Built-in default profile is missing.")
-
-    variables = build_template_variables(project_name, project_path)
-    rendered_files: List[Tuple[str, bytes, Path]] = []
-    for profile_file in sorted(default_profile.path.rglob("*")):
-        if not profile_file.is_file():
-            continue
-        rel_path = Path(".cl9") / "profiles" / "default" / profile_file.relative_to(default_profile.path)
-        rendered_files.append((str(rel_path), render_template_file(profile_file, variables), profile_file))
-    return rendered_files
-
-
-def _materialize_profile(project_root: Path, profile_name: str) -> Path:
-    """Ensure a profile has a project-local working copy and return its path."""
-    local_dir = _project_profiles_dir(project_root) / profile_name
-    if local_dir.is_dir():
-        return local_dir.resolve()
-
-    resolved = resolve_profile(profile_name, project_root, config.profiles_dir)
-    if resolved is None or resolved.path.resolve() == local_dir.resolve():
-        raise click.ClickException(f"Profile '{profile_name}' was not found.")
-
-    variables = build_template_variables(_load_local_project_name(project_root), project_root)
-    local_dir.mkdir(parents=True, exist_ok=True)
-    for source_file in sorted(resolved.path.rglob("*")):
-        if not source_file.is_file():
-            continue
-        dest = local_dir / source_file.relative_to(resolved.path)
-        _write_rendered_file(dest, source_file, render_template_file(source_file, variables))
-
-    return local_dir.resolve()
-
-
 def _desired_project_files(project_path: Path, project_name: str, env_type: str) -> Tuple[object, List[Tuple[str, bytes, Path]]]:
     """Return the environment spec and rendered managed files for a project."""
     env_spec = _resolve_environment_spec(env_type)
@@ -258,7 +213,6 @@ def _desired_project_files(project_path: Path, project_name: str, env_type: str)
         rel_path = str(template_file.relative_to(env_spec.template_path))
         desired_files.append((rel_path, render_template_file(template_file, variables), template_file))
 
-    desired_files.extend(_render_default_profile_files(project_path, project_name))
     return env_spec, desired_files
 
 
@@ -278,8 +232,6 @@ def _sync_project_files(project_path: Path, project_name: str, env_type: str, di
         if not diff:
             dest_dir.mkdir(parents=True, exist_ok=True)
         changed = True
-
-    (_project_profiles_dir(project_path) / "default").mkdir(parents=True, exist_ok=True) if not diff else None
 
     delivered_files = {}
     for rel_path, rendered, source_path in desired_files:
@@ -319,10 +271,9 @@ def _sync_project_files(project_path: Path, project_name: str, env_type: str, di
     return changed
 
 
-def _resolve_agent_profile(project_root: Path, profile_name: str) -> ProfileSpec:
-    """Materialize and resolve a profile, returning the ProfileSpec."""
-    _materialize_profile(project_root, profile_name)
-    profile = resolve_profile(profile_name, project_root, config.profiles_dir)
+def _resolve_agent_profile(profile_name: str) -> ProfileSpec:
+    """Resolve a built-in profile by name."""
+    profile = builtin_profile(profile_name)
     if profile is None:
         raise click.ClickException(f"Profile '{profile_name}' was not found.")
     return profile
@@ -493,13 +444,6 @@ def _initialize_project(project_path: Path, project_name: str, env_type: str) ->
         str(path.relative_to(project_path)): hash_file(path)
         for path in delivered_paths
     }
-
-    profiles_dir = _project_profiles_dir(project_path) / "default"
-    profiles_dir.mkdir(parents=True, exist_ok=True)
-    for rel_path, rendered, source_path in _render_default_profile_files(project_path, project_name):
-        dest = project_path / rel_path
-        _write_rendered_file(dest, source_path, rendered)
-        delivered_files[rel_path] = hash_bytes(rendered)
 
     save_state(project_path, env_type, delivered_files)
 
@@ -875,7 +819,7 @@ def agent_spawn(session_name, profile_name, agent_args):
         return
 
     resolved_profile_name = profile_name or _default_profile_name(project_root)
-    profile = _resolve_agent_profile(project_root, resolved_profile_name)
+    profile = _resolve_agent_profile(resolved_profile_name)
     adapter = get_adapter_for_profile(profile)
 
     session_id = str(uuid.uuid4())
@@ -914,7 +858,7 @@ def agent_continue(target, agent_args):
     if state.session_has_running_process(session.session_id):
         raise click.ClickException("Session already has a running process.")
 
-    profile = _resolve_agent_profile(project_root, session.profile)
+    profile = _resolve_agent_profile(session.profile)
     adapter = get_adapter_for_profile(profile)
 
     # For tools like Codex, we need the tool_session_id from session metadata
@@ -947,7 +891,7 @@ def agent_fork(target, session_name, profile_name, agent_args):
         raise click.ClickException(str(exc)) from exc
 
     resolved_profile_name = profile_name or parent.profile
-    profile = _resolve_agent_profile(project_root, resolved_profile_name)
+    profile = _resolve_agent_profile(resolved_profile_name)
     adapter = get_adapter_for_profile(profile)
 
     child_session_id = str(uuid.uuid4())

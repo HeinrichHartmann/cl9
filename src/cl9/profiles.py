@@ -70,23 +70,6 @@ class ProfileSpec:
         return self.path / "INSTRUCTIONS.md"
 
 
-def resolve_profile(name: str, project_root: Path, user_profiles_dir: Path) -> Optional[ProfileSpec]:
-    """Resolve a profile by name."""
-    candidates = [
-        project_root / ".cl9" / "profiles" / name,
-        user_profiles_dir / name,
-        BUILTIN_DIR / name,
-    ]
-
-    for candidate in candidates:
-        if candidate.is_dir():
-            resolved_path = candidate.resolve()
-            manifest = _load_manifest(resolved_path)
-            return ProfileSpec(name=name, path=resolved_path, manifest=manifest)
-
-    return None
-
-
 def builtin_profile(name: str) -> Optional[ProfileSpec]:
     """Resolve a built-in profile by name only."""
     candidate = BUILTIN_DIR / name

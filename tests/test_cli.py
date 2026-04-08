@@ -155,13 +155,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("# demo", (project_dir / "README.md").read_text())
         self.assertIn("demo - Agent Memory", (project_dir / "MEMORY.md").read_text())
         self.assertIn('description = "demo - cl9 project environment"', (project_dir / "flake.nix").read_text())
-        self.assertTrue((project_dir / ".cl9" / "profiles" / "default").is_dir())
-        self.assertIn(
-            "This is a cl9-managed project.",
-            (project_dir / ".cl9" / "profiles" / "default" / "CLAUDE.md").read_text(),
-        )
-        self.assertTrue((project_dir / ".cl9" / "profiles" / "default" / "settings.json").exists())
-        self.assertTrue((project_dir / ".cl9" / "profiles" / "default" / "statusline.py").exists())
+        self.assertFalse((project_dir / ".cl9" / "profiles").exists())
         state = self._read_state(project_dir)
         self.assertEqual(state["type"], "default")
         self.assertEqual(
@@ -171,10 +165,6 @@ class CliTests(unittest.TestCase):
                 "MEMORY.md",
                 "flake.nix",
                 ".envrc",
-                ".cl9/profiles/default/CLAUDE.md",
-                ".cl9/profiles/default/settings.json",
-                ".cl9/profiles/default/statusline.py",
-                ".cl9/profiles/default/manifest.json",
             },
         )
         self.assertIsNone(self.test_config.get_project("demo"))
@@ -188,20 +178,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertTrue((project_dir / ".cl9" / "config.json").exists())
         self.assertTrue((project_dir / ".cl9" / "env" / "state.json").exists())
-        self.assertTrue((project_dir / ".cl9" / "profiles" / "default" / "CLAUDE.md").exists())
-        self.assertTrue((project_dir / ".cl9" / "profiles" / "default" / "settings.json").exists())
-        self.assertTrue((project_dir / ".cl9" / "profiles" / "default" / "statusline.py").exists())
+        self.assertFalse((project_dir / ".cl9" / "profiles").exists())
         self.assertFalse((project_dir / "README.md").exists())
         self.assertFalse((project_dir / "src").exists())
-        self.assertEqual(
-            {
-                ".cl9/profiles/default/CLAUDE.md",
-                ".cl9/profiles/default/settings.json",
-                ".cl9/profiles/default/statusline.py",
-                ".cl9/profiles/default/manifest.json",
-            },
-            set(self._read_state(project_dir)["files"]),
-        )
+        self.assertEqual(set(self._read_state(project_dir)["files"]), set())
 
     def test_init_fails_before_writing_when_template_paths_conflict(self):
         project_dir = self.work_dir / "conflict"
@@ -271,14 +251,10 @@ class CliTests(unittest.TestCase):
         self.assertTrue(captured["env"]["PATH"].startswith(str((project_dir / "bin").resolve())))
         self.assertEqual(captured["argv"][1], "-ic")
         self.assertIn("claude --setting-sources user", captured["argv"][2])
-        self.assertIn(
-            str((project_dir / ".cl9" / "profiles" / "default" / "CLAUDE.md").resolve()),
-            captured["argv"][2],
-        )
-        self.assertIn(
-            str((project_dir / ".cl9" / "profiles" / "default" / "settings.json").resolve()),
-            captured["argv"][2],
-        )
+        self.assertIn("--append-system-prompt-file", captured["argv"][2])
+        self.assertIn("default/CLAUDE.md", captured["argv"][2])
+        self.assertIn("--settings", captured["argv"][2])
+        self.assertIn("default/settings.json", captured["argv"][2])
         self.assertIn("--session-id 12345678-1234-5678-1234-567812345678", captured["argv"][2])
 
     def test_agent_without_subcommand_shows_help(self):
@@ -335,48 +311,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("--resume ffffffff-ffff-ffff-ffff-ffffffffffff", captured["argv"][2])
         self.assertIn("--model opus", captured["argv"][2])
 
-    def test_agent_spawn_uses_project_local_settings_and_mcp_overrides(self):
-        project_dir = self.work_dir / "agent-overrides"
-        project_dir.mkdir()
-        self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", "minimal"])
-        profile_dir = project_dir / ".cl9" / "profiles" / "default"
-        (profile_dir / "settings.json").write_text('{"model":"opus"}\n')
-        (profile_dir / "mcp.json").write_text('{"mcpServers":{}}\n')
-        self._chdir(project_dir)
-
-        with patch.object(cli_module.uuid, "uuid4", return_value=uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")):
-            _, captured = self._invoke_agent(["agent", "spawn"])
-
-        self.assertIn(str((profile_dir / "CLAUDE.md").resolve()), captured["argv"][2])
-        self.assertIn(str((profile_dir / "settings.json").resolve()), captured["argv"][2])
-        self.assertIn(str((profile_dir / "mcp.json").resolve()), captured["argv"][2])
-
-    def test_agent_spawn_materializes_user_installed_profile_to_project(self):
-        project_dir = self.work_dir / "agent-user-profile"
-        project_dir.mkdir()
-        self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", "minimal"])
-
-        default_profile_dir = project_dir / ".cl9" / "profiles" / "default"
-        for path in default_profile_dir.rglob("*"):
-            if path.is_file():
-                path.unlink()
-        default_profile_dir.rmdir()
-
-        user_profile_dir = self.base / ".cl9" / "profiles" / "careful"
-        user_profile_dir.mkdir(parents=True)
-        (user_profile_dir / "CLAUDE.md").write_text("# careful {{PROJECT_NAME}}\n")
-
-        self._chdir(project_dir)
-
-        with patch.object(cli_module.uuid, "uuid4", return_value=uuid.UUID("dddddddd-dddd-dddd-dddd-dddddddddddd")):
-            _, captured = self._invoke_agent(["agent", "spawn", "--profile", "careful"])
-
-        materialized = project_dir / ".cl9" / "profiles" / "careful" / "CLAUDE.md"
-        self.assertTrue(materialized.exists())
-        self.assertIn("# careful agent-user-profile", materialized.read_text())
-        self.assertIn(str(materialized.resolve()), captured["argv"][2])
-
-    def test_agent_spawn_materializes_builtin_codex_profile(self):
+    def test_agent_spawn_uses_builtin_codex_profile(self):
         project_dir = self.work_dir / "agent-codex-profile"
         project_dir.mkdir()
         self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", "minimal"])
@@ -386,13 +321,11 @@ class CliTests(unittest.TestCase):
             result, captured = self._invoke_agent(["agent", "spawn", "--profile", "codex"])
 
         self.assertEqual(result.exit_code, 0)
-        materialized_dir = project_dir / ".cl9" / "profiles" / "codex"
-        self.assertTrue((materialized_dir / "INSTRUCTIONS.md").exists())
-        self.assertTrue((materialized_dir / "manifest.json").exists())
+        self.assertFalse((project_dir / ".cl9" / "profiles").exists())
         self.assertEqual(captured["env"]["CL9_PROFILE"], "codex")
         self.assertEqual(captured["env"]["CL9_TOOL"], "codex")
-        # Codex adapter uses --instructions flag for INSTRUCTIONS.md
-        self.assertIn(str((materialized_dir / "INSTRUCTIONS.md").resolve()), captured["argv"][2])
+        # Codex adapter uses --instructions pointing at the built-in profile
+        self.assertIn("codex/INSTRUCTIONS.md", captured["argv"][2])
 
     def test_agent_spawn_errors_outside_project(self):
         outside_dir = self.work_dir / "outside"
@@ -602,19 +535,6 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Overwrote:   README.md", result.output)
         self.assertEqual((project_dir / "README.md").read_text(), "# two\n")
-
-    def test_init_force_recreates_default_profile_layout(self):
-        template_dir = self._create_template({"README.md": "# one\n"})
-        project_dir = self.work_dir / "profile-reinit"
-        project_dir.mkdir()
-        self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", str(template_dir)])
-        legacy_dir = project_dir / ".cl9" / "profiles" / "default"
-        (legacy_dir / "CLAUDE.md").unlink()
-
-        result = self.runner.invoke(cli_module.main, ["init", str(project_dir), "--force"])
-
-        self.assertEqual(result.exit_code, 0)
-        self.assertTrue((legacy_dir / "CLAUDE.md").exists())
 
 
 if __name__ == "__main__":
