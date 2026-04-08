@@ -22,17 +22,15 @@ This ADR defines that model.
 
 ### Profile model
 
-Profiles are read-only templates. A profile is a directory containing files like `CLAUDE.md`, `settings.json`, `mcp.json`, and a `manifest.json` declaring the agent executable (ADR 0008). Profiles exist at three scopes:
+Profiles are read-only templates. A profile is a directory containing files like `CLAUDE.md`, `settings.json`, `mcp.json`, and a `manifest.json` declaring the agent executable (ADR 0008). Profiles ship with cl9 itself; users do not author profiles, and how developers might ship profile packages is deferred to a future ADR.
 
-| Scope         | Location                  | Ownership                          |
-|---------------|---------------------------|------------------------------------|
-| Built-in      | cl9 package directory     | cl9 maintainers; immutable to users |
-| User-global   | `~/.cl9/profiles/<name>/` | User                               |
-| Project-local | `.cl9/profiles/<name>/`   | User; typically committed          |
+The model is one equation:
 
-Resolution order is project-local → user-global → built-in. First match wins.
+    profile (immutable, from cl9) + init.py (per-project) → runtime (per-session, mutable)
 
-Profiles are **never materialized** into project state. cl9 reads them in place, from wherever they resolve. Upgrading cl9 updates every built-in profile across every project instantly, because there are no copies to stale. Users who want to customize a built-in profile do so by creating a profile at a higher-priority scope — not by cloning and patching an existing one.
+A session's runtime directory is materialized from the profile's files, optionally mutated by the project's `init.py`, and passed to claude via explicit flags. It is never merged with user-global `~/.claude/` state.
+
+Because profiles are not copied into project state, upgrading cl9 takes effect on the next session spawn — no migration, no stale copies.
 
 ### Session runtime directory
 
@@ -63,11 +61,13 @@ claude --bare \
 
 **Tolerated leak.** Even under `--bare`, claude writes session transcripts to `~/.claude/projects/<encoded-cwd>/*.jsonl`. That is the mechanism that makes `claude --resume` work, and cl9's resume path depends on it. The invariant cl9 cares about is one-directional: claude must not *read* auth or config from `~/.claude/`. History writes are fine.
 
+We recommend keeping all configuration in the project (via profile + `init.py`) and leaving `~/.claude/` free of manual edits.
+
 ### Spawn pipeline
 
 `cl9 agent spawn` executes the following, in order:
 
-1. Resolve the profile via the scope hierarchy above.
+1. Resolve the requested profile from cl9's built-in set.
 2. Create `.cl9/sessions/<id>/runtime/`.
 3. Copy every regular file from the resolved profile directory into the runtime directory. This is the default baseline: if there is no init script, the runtime is exactly a copy of the profile.
 4. If `.cl9/init/init.py` exists, run it (see contract below). The script mutates runtime files in place, typically using the `cl9.claude` helpers.
@@ -174,7 +174,8 @@ This exists because claude encodes the cwd into its session-storage path (`~/.cl
 The following are explicitly out of scope for this ADR, so a reader knows where the line is:
 
 - **Session discovery UX.** Interactive TUI selectors, fuzzy search, transcript preview, enhanced `session list` formatting. These are convenience features that can ship without architectural decisions.
-- **Profile management commands.** `profile clone`, `profile diff`, `profile audit`, `profile list`, `profile install-mcp`. Users who need custom profiles create files directly at user-global or project-local scope.
+- **User-authored profiles.** Profiles ship with cl9. Users customize runtime behavior via `init.py`, not by authoring new profiles. How developers might distribute profile packages is deferred to a future ADR.
+- **Profile management commands.** `profile clone`, `profile diff`, `profile audit`, `profile list`, `profile install-mcp`. Follows from the above: nothing to manage.
 - **MCP installation command.** MCP servers are declared in a profile's `mcp.json`. Init scripts mutate that configuration in the runtime dir when needed; persistent additions require authoring a new profile. There is no `cl9 install-mcp`.
 - **Non-Anthropic env var propagation.** The helper surface only touches `settings.json`, `settings.local.json`, and `mcp.json`. Injecting variables claude itself doesn't read (e.g., `AWS_PROFILE`, `GOOGLE_APPLICATION_CREDENTIALS`) requires setting them in the parent shell before `cl9 agent spawn`. A future ADR can add a runtime env-injection mechanism if the pain justifies it.
 - **Project relocatability.** Moving a project to a different path invalidates existing session runtimes and claude's session storage. Clear errors on failure are enough for now.
