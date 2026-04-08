@@ -269,6 +269,7 @@ class ProjectState:
                     s.status,
                     s.created_at,
                     s.last_used_at,
+                    s.source_cwd,
                     s.forked_from_session_id,
                     EXISTS(
                         SELECT 1

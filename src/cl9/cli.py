@@ -871,10 +871,11 @@ def _run_spawn_pipeline(
 def _claude_transcript_path(session_cwd: Path, session_id: str) -> Path:
     """Return the path claude uses to store the session transcript.
 
-    Claude encodes the working directory into its project storage path by
-    replacing every '/' with '-' (the leading slash becomes a leading dash).
+    Claude encodes the working directory by replacing '/' and '.' with '-'.
+    Empirically verified: /Users/heinrich.hartmann/x → -Users-heinrich-hartmann-x
     """
-    encoded = str(session_cwd.resolve()).replace("/", "-")
+    raw = str(session_cwd.resolve())
+    encoded = raw.replace("/", "-").replace(".", "-")
     return Path.home() / ".claude" / "projects" / encoded / f"{session_id}.jsonl"
 
 
@@ -1268,7 +1269,8 @@ def session():
 
 
 @session.command("list")
-def session_list():
+@click.option("-v", "--verbose", is_flag=True, help="Show transcript path and continue command.")
+def session_list(verbose):
     """List sessions for the current project."""
     project_root = _current_project_path()
     sessions = _project_state(project_root).list_sessions()
@@ -1278,16 +1280,37 @@ def session_list():
         return
 
     for entry in sessions:
-        display = entry["name"] or entry["session_id"]
-        click.echo(f"{display}")
-        click.echo(f"  ID: {entry['session_id']}")
-        click.echo(f"  Profile: {entry['profile']}")
-        click.echo(f"  Status: {entry['status']}")
-        click.echo(f"  Last used: {entry['last_used_at']}")
-        if entry["forked_from_session_id"]:
-            click.echo(f"  Forked from: {entry['forked_from_session_id']}")
+        sid = entry["session_id"]
+        display = entry["name"] or sid
+        source_cwd = Path(entry["source_cwd"]) if entry.get("source_cwd") else None
+        transcript = _claude_transcript_path(source_cwd, sid) if source_cwd else None
+        transcript_ok = transcript is not None and transcript.is_file()
+        transcript_mark = "✓" if transcript_ok else "✗"
+
+        status = entry["status"]
         if entry["has_running_process"]:
-            click.echo("  Running: yes")
+            status = "running"
+
+        click.echo(f"{display}  [{transcript_mark}]")
+        click.echo(f"  ID:        {sid}")
+        click.echo(f"  Profile:   {entry['profile']}  status={status}")
+        click.echo(f"  Last used: {entry['last_used_at'][:19]}")
+        if entry.get("forked_from_session_id"):
+            click.echo(f"  Forked from: {entry['forked_from_session_id']}")
+
+        if verbose:
+            click.echo(f"  Spawn cwd: {source_cwd}")
+            if transcript:
+                click.echo(f"  Transcript: {transcript}  {'[exists]' if transcript_ok else '[MISSING]'}")
+            try:
+                profile = _resolve_agent_profile(entry["profile"])
+                adapter = get_adapter_for_profile(profile)
+                runtime_dir = runtime_dir_for(project_root, sid)
+                spec = adapter.build_continue_command(profile, sid, None, runtime_dir, [])
+                click.echo(f"  Command:   {shlex.join(spec.command)}")
+            except Exception as exc:
+                click.echo(f"  Command:   (unavailable: {exc})")
+
         click.echo()
 
 
