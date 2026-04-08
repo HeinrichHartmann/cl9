@@ -1067,6 +1067,9 @@ def completion(shell):
     _emit_completion_script(shell)
 
 
+main.add_command(agent_spawn, name="spawn")
+
+
 @main.command(
     "run",
     context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
