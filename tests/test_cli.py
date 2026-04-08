@@ -183,6 +183,35 @@ class CliTests(unittest.TestCase):
         self.assertFalse((project_dir / "src").exists())
         self.assertEqual(set(self._read_state(project_dir)["files"]), set())
 
+    def test_init_creates_init_example_py(self):
+        project_dir = self.work_dir / "init-example"
+        project_dir.mkdir()
+
+        result = self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", "minimal"])
+
+        self.assertEqual(result.exit_code, 0)
+        example = project_dir / ".cl9" / "init" / "init-example.py"
+        self.assertTrue(example.exists())
+        content = example.read_text()
+        self.assertIn("from cl9 import agent", content)
+        self.assertFalse((project_dir / ".cl9" / "init" / "init.py").exists())
+
+    def test_init_force_rewrites_init_example_but_not_init_py(self):
+        project_dir = self.work_dir / "init-force"
+        project_dir.mkdir()
+        self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", "minimal"])
+
+        # Place a custom init.py and corrupt init-example.py
+        init_dir = project_dir / ".cl9" / "init"
+        (init_dir / "init.py").write_text("# my custom init\n")
+        (init_dir / "init-example.py").write_text("# stale\n")
+
+        self.runner.invoke(cli_module.main, ["init", str(project_dir), "--force"])
+
+        # init-example.py should be restored; init.py must be untouched
+        self.assertIn("from cl9 import agent", (init_dir / "init-example.py").read_text())
+        self.assertEqual((init_dir / "init.py").read_text(), "# my custom init\n")
+
     def test_init_fails_before_writing_when_template_paths_conflict(self):
         project_dir = self.work_dir / "conflict"
         project_dir.mkdir()

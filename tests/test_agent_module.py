@@ -319,5 +319,78 @@ class SessionRuntimeLifecycleTests(unittest.TestCase):
         self.assertFalse(runtime.exists())
 
 
+class SpawnPipelineTests(unittest.TestCase):
+    """_run_spawn_pipeline wires up profile → init.py → runtime dir correctly."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.project_root = Path(self.tmpdir.name) / "project"
+        self.project_root.mkdir()
+        # Minimal cl9 project scaffold
+        cl9_dir = self.project_root / ".cl9"
+        cl9_dir.mkdir()
+        import json as _json
+        (cl9_dir / "config.json").write_text(_json.dumps({"name": "test", "version": "1"}))
+
+    def _run(self, session_id="test-session", session_name=None, profile_name="default"):
+        import cl9.cli as cli_module
+        return cli_module._run_spawn_pipeline(
+            project_root=self.project_root,
+            profile_name=profile_name,
+            session_id=session_id,
+            session_name=session_name,
+            spawn_cwd=self.project_root,
+        )
+
+    def test_pipeline_creates_runtime_dir(self):
+        self._run(session_id="s-create")
+        runtime = runtime_dir_for(self.project_root, "s-create")
+        self.assertTrue(runtime.is_dir())
+
+    def test_pipeline_init_py_mutations_land_in_env(self):
+        init_dir = self.project_root / ".cl9" / "init"
+        init_dir.mkdir(parents=True)
+        (init_dir / "init.py").write_text(
+            "from cl9 import agent\nagent.env['HELLO'] = 'world'\n"
+        )
+
+        self._run(session_id="s-init")
+
+        self.assertEqual(agent.env["HELLO"], "world")
+
+    def test_pipeline_writes_settings_from_init(self):
+        init_dir = self.project_root / ".cl9" / "init"
+        init_dir.mkdir(parents=True)
+        (init_dir / "init.py").write_text(
+            "from cl9 import agent\nagent.settings['model'] = 'opus'\n"
+        )
+
+        _, runtime_dir = self._run(session_id="s-settings")
+
+        import json as _json
+        data = _json.loads((runtime_dir / "settings.json").read_text())
+        self.assertEqual(data["model"], "opus")
+
+    def test_pipeline_rollback_on_init_failure(self):
+        import cl9.cli as cli_module
+        init_dir = self.project_root / ".cl9" / "init"
+        init_dir.mkdir(parents=True)
+        (init_dir / "init.py").write_text("raise RuntimeError('boom')\n")
+
+        sid = "s-rollback"
+        with self.assertRaises(RuntimeError):
+            cli_module._run_spawn_pipeline(
+                project_root=self.project_root,
+                profile_name="default",
+                session_id=sid,
+                session_name=None,
+                spawn_cwd=self.project_root,
+            )
+
+        runtime = runtime_dir_for(self.project_root, sid)
+        self.assertFalse(runtime.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

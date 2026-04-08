@@ -182,12 +182,14 @@ def _planned_environment_paths(project_path: Path, env_spec) -> Tuple[List[Path]
     planned_dirs = [
         project_path / ".cl9",
         project_path / ".cl9" / "env",
+        project_path / ".cl9" / "init",
     ]
     planned_dirs.extend(project_path / directory for directory in env_spec.directories)
 
     planned_files = [
         project_path / ".cl9" / "config.json",
         project_path / ".cl9" / "env" / "state.json",
+        project_path / ".cl9" / "init" / "init-example.py",
     ]
 
     for template_file in iter_template_files(env_spec.template_path):
@@ -430,6 +432,21 @@ def _prune_projects() -> int:
     return pruned
 
 
+_INIT_EXAMPLE_SOURCE = (
+    Path(__file__).parent / "scaffold" / "init-example.py"
+)
+
+
+def _write_init_example(project_path: Path, force: bool = False) -> None:
+    """Write .cl9/init/init-example.py. Never touches init.py."""
+    init_dir = project_path / ".cl9" / "init"
+    init_dir.mkdir(parents=True, exist_ok=True)
+    dest = init_dir / "init-example.py"
+    if dest.exists() and not force:
+        return
+    dest.write_bytes(_INIT_EXAMPLE_SOURCE.read_bytes())
+
+
 def _initialize_project(project_path: Path, project_name: str, env_type: str) -> None:
     """Initialize project files, environment scaffolding, and registry state."""
     env_spec = _resolve_environment_spec(env_type)
@@ -446,6 +463,8 @@ def _initialize_project(project_path: Path, project_name: str, env_type: str) ->
     config_file = cl9_dir / "config.json"
     with open(config_file, "w") as f:
         json.dump(project_config, f, indent=2)
+
+    _write_init_example(project_path)
 
     variables = build_template_variables(project_name, project_path)
     delivered_paths = apply_environment(env_spec, project_path, variables)
@@ -667,6 +686,7 @@ def _init_command(path: str, project_name: Union[str, None], env_type: Union[str
 
     if existing_project:
         _sync_project_files(project_path, project_name, env_type, diff=False, force=True)
+        _write_init_example(project_path, force=True)
         click.echo()
         click.echo(f"Reinitialized cl9 project: {project_name}")
         click.echo(f"  Location: {project_path}")
@@ -822,6 +842,16 @@ def _run_spawn_pipeline(
     return profile, runtime_dir
 
 
+def _claude_transcript_path(session_cwd: Path, session_id: str) -> Path:
+    """Return the path claude uses to store the session transcript.
+
+    Claude encodes the working directory into its project storage path by
+    replacing every '/' with '-' (the leading slash becomes a leading dash).
+    """
+    encoded = str(session_cwd.resolve()).replace("/", "-")
+    return Path.home() / ".claude" / "projects" / encoded / f"{session_id}.jsonl"
+
+
 def _launch_agent_process(
     project_root: Path,
     session_id: str,
@@ -829,6 +859,7 @@ def _launch_agent_process(
     profile: ProfileSpec,
     runtime_dir: Path,
     cmd: List[str],
+    launch_cwd: Union[Path, None] = None,
 ) -> None:
     """Launch an agent process and update project-local session state."""
     env = os.environ.copy()
@@ -844,7 +875,7 @@ def _launch_agent_process(
 
     state = _project_state(project_root)
     project_name = _load_local_project_name(project_root)
-    current_cwd = Path.cwd().resolve()
+    current_cwd = (launch_cwd or Path.cwd()).resolve()
     process_id = state.start_process(session_id, current_cwd, cmd)
 
     click.echo(f"Launching agent in project: {project_name}")
@@ -931,6 +962,17 @@ def agent_continue(target, agent_args):
     if state.session_has_running_process(session.session_id):
         raise click.ClickException("Session already has a running process.")
 
+    spawn_cwd = session.source_cwd or Path.cwd().resolve()
+
+    # Resume guardrail: verify claude's transcript exists at the expected path.
+    transcript = _claude_transcript_path(spawn_cwd, session.session_id)
+    if not transcript.is_file():
+        raise click.ClickException(
+            f"Session transcript not found at {transcript}.\n"
+            f"The project may have been moved, or ~/.claude/projects was pruned.\n"
+            f"Use 'cl9 agent fork {session.session_id}' to start a fresh session."
+        )
+
     profile = _resolve_agent_profile(session.profile)
     adapter = get_adapter_for_profile(profile)
     runtime_dir = runtime_dir_for(project_root, session.session_id)
@@ -941,7 +983,8 @@ def agent_continue(target, agent_args):
     )
 
     _launch_agent_process(
-        project_root, session.session_id, session.name, profile, runtime_dir, launch_spec.command
+        project_root, session.session_id, session.name, profile, runtime_dir,
+        launch_spec.command, launch_cwd=spawn_cwd,
     )
 
 
