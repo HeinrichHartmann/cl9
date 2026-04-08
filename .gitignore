@@ -4,3 +4,6 @@ REVIEW/
 # Project-local state
 .cl9/
 /tasks/
+
+# Scratch plans
+/PLAN.md
