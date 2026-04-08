@@ -1,8 +1,27 @@
 # cl9 - LLM Session Manager
 
-`cl9` (Claw 9) is an opinionated LLM session manager for organizing AI-assisted work across isolated project contexts. Named after Plan 9, it embraces the philosophy of deliberate copying and context isolation over sharing and symlinking.
+`cl9` (Cloud 9) is an opinionated LLM session manager for organizing AI-assisted work across isolated project contexts.
 
 Projects are self-contained workspaces where everything relevant to a context lives together. The same source repository or document can exist in multiple projects as independent copies, enabling parallel exploration and later merging of state.
+
+## Naming & Inspiration
+
+**cl9** = **Cloud 9**: **Claude** → **Cloud**, **9** from [**Plan 9**](https://en.wikipedia.org/wiki/Plan_9_from_Bell_Labs), the distributed-namespace successor to Unix from Bell Labs.
+
+The framing: treat a project as an operating system shared by humans and LLM agents. Both run inside it as processes, both get suspended and resumed, both need somewhere durable to park their working state between runs.
+
+| OS concept | cl9                                                                         |
+| ---------- | --------------------------------------------------------------------------- |
+| Process    | A human shell session or an LLM agent session                               |
+| Memory     | Project context — humans context-switch, LLMs hit context limits, same fix |
+| IPC        | Cross-session coordination — tickets, todos, job queues *(TBD)*             |
+
+**Immediate priority:** getting **spawn / resume / fork** right and ergonomic. These are the three primitives that decide whether agent sessions feel like real processes to work with.
+
+**Open problems:**
+
+- **Copy-on-write memory across `fork`** *(TBD)* — when a session forks, the child should see the parent's project state and diverge lazily on first write, the way Unix `fork()` shares pages with the parent until one side mutates them. Today a fork is just a fresh session pointed at the same tree; true COW semantics remain a design problem.
+- **IPC** — no primitive yet for one session to hand work off to another without a human in the middle. The shape of the answer is probably ticket- or queue-like, but the right abstraction is still open.
 
 ## Installation
 
