@@ -99,8 +99,9 @@ def main() -> int:
     except json.JSONDecodeError:
         return 0
 
-    project = os.environ.get("CL9_PROJECT", os.path.basename(os.getcwd()))
-    profile = os.environ.get("CL9_PROFILE", "default")
+    project_root = os.environ.get("CL9_PROJECT_ROOT", "")
+    project = os.path.basename(project_root) if project_root else os.path.basename(os.getcwd())
+    profile = os.environ.get("CL9_PROFILE_NAME", "default")
     model = data.get("model", {}).get("display_name", "Claude")
     session = data.get("session_name") or profile
     context = data.get("context_window", {})

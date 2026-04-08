@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Type
+from pathlib import Path
+from typing import List, Optional, Dict, Type
 
 from .profiles import ProfileSpec
 
@@ -27,6 +28,7 @@ class LaunchAdapter(ABC):
         self,
         profile: ProfileSpec,
         session_id: str,
+        runtime_dir: Path,
         extra_args: List[str],
     ) -> LaunchSpec:
         """Build the command to spawn a new agent session."""
@@ -38,6 +40,7 @@ class LaunchAdapter(ABC):
         profile: ProfileSpec,
         session_id: str,
         tool_session_id: Optional[str],
+        runtime_dir: Path,
         extra_args: List[str],
     ) -> LaunchSpec:
         """Build the command to continue an existing session."""
@@ -50,6 +53,7 @@ class LaunchAdapter(ABC):
         parent_session_id: str,
         child_session_id: str,
         parent_tool_session_id: Optional[str],
+        runtime_dir: Path,
         extra_args: List[str],
     ) -> LaunchSpec:
         """Build the command to fork a session."""
@@ -61,21 +65,21 @@ class ClaudeAdapter(LaunchAdapter):
 
     tool_name = "claude"
 
-    def _base_command(self, profile: ProfileSpec) -> List[str]:
-        """Build the base Claude command with profile configuration."""
-        cmd = [profile.executable, "--setting-sources", "user"]
+    def _base_command(self, profile: ProfileSpec, runtime_dir: Path) -> List[str]:
+        """Build the sealed base command pointing at the session runtime dir."""
+        cmd = [profile.executable, "--bare"]
 
-        claude_md = profile.claude_md
+        claude_md = runtime_dir / "CLAUDE.md"
         if claude_md.is_file():
-            cmd.extend(["--append-system-prompt-file", str(claude_md.resolve())])
+            cmd.extend(["--append-system-prompt-file", str(claude_md)])
 
-        settings_file = profile.settings_json
+        settings_file = runtime_dir / "settings.json"
         if settings_file.is_file():
-            cmd.extend(["--settings", str(settings_file.resolve())])
+            cmd.extend(["--settings", str(settings_file)])
 
-        mcp_file = profile.mcp_json
+        mcp_file = runtime_dir / "mcp.json"
         if mcp_file.is_file():
-            cmd.extend(["--mcp-config", str(mcp_file.resolve())])
+            cmd.extend(["--mcp-config", str(mcp_file)])
 
         return cmd
 
@@ -83,10 +87,10 @@ class ClaudeAdapter(LaunchAdapter):
         self,
         profile: ProfileSpec,
         session_id: str,
+        runtime_dir: Path,
         extra_args: List[str],
     ) -> LaunchSpec:
-        """Build spawn command for Claude Code."""
-        cmd = self._base_command(profile)
+        cmd = self._base_command(profile, runtime_dir)
         cmd.extend(["--session-id", session_id])
         cmd.extend(extra_args)
         return LaunchSpec(command=cmd, tool_session_id=session_id)
@@ -96,11 +100,10 @@ class ClaudeAdapter(LaunchAdapter):
         profile: ProfileSpec,
         session_id: str,
         tool_session_id: Optional[str],
+        runtime_dir: Path,
         extra_args: List[str],
     ) -> LaunchSpec:
-        """Build continue command for Claude Code."""
-        cmd = self._base_command(profile)
-        # Claude Code uses the same session ID for cl9 and tool
+        cmd = self._base_command(profile, runtime_dir)
         resume_id = tool_session_id or session_id
         cmd.extend(["--resume", resume_id])
         cmd.extend(extra_args)
@@ -112,10 +115,10 @@ class ClaudeAdapter(LaunchAdapter):
         parent_session_id: str,
         child_session_id: str,
         parent_tool_session_id: Optional[str],
+        runtime_dir: Path,
         extra_args: List[str],
     ) -> LaunchSpec:
-        """Build fork command for Claude Code."""
-        cmd = self._base_command(profile)
+        cmd = self._base_command(profile, runtime_dir)
         parent_id = parent_tool_session_id or parent_session_id
         cmd.extend(["--resume", parent_id, "--fork-session", "--session-id", child_session_id])
         cmd.extend(extra_args)
@@ -127,46 +130,35 @@ class CodexAdapter(LaunchAdapter):
 
     tool_name = "codex"
 
-    def _base_command(self, profile: ProfileSpec) -> List[str]:
-        """Build the base Codex command with profile configuration."""
+    def _base_command(self, profile: ProfileSpec, runtime_dir: Path) -> List[str]:
         cmd = [profile.executable]
-
-        # Codex uses --instructions for system prompt
-        instructions = profile.instructions_md
+        instructions = runtime_dir / "INSTRUCTIONS.md"
         if instructions.is_file():
-            cmd.extend(["--instructions", str(instructions.resolve())])
-
+            cmd.extend(["--instructions", str(instructions)])
         return cmd
 
     def build_spawn_command(
         self,
         profile: ProfileSpec,
-        session_id: str,  # noqa: ARG002 - Codex doesn't support session ID injection
+        session_id: str,  # noqa: ARG002
+        runtime_dir: Path,
         extra_args: List[str],
     ) -> LaunchSpec:
-        """Build spawn command for Codex.
-
-        Note: Codex CLI does not support injected session IDs at spawn time.
-        The tool_session_id will need to be discovered after the process exits.
-        """
-        del session_id  # Codex doesn't support session ID injection
-        cmd = self._base_command(profile)
+        del session_id
+        cmd = self._base_command(profile, runtime_dir)
         cmd.extend(extra_args)
         return LaunchSpec(command=cmd, tool_session_id=None)
 
     def build_continue_command(
         self,
         profile: ProfileSpec,
-        session_id: str,  # noqa: ARG002 - uses tool_session_id instead
+        session_id: str,  # noqa: ARG002
         tool_session_id: Optional[str],
+        runtime_dir: Path,
         extra_args: List[str],
     ) -> LaunchSpec:
-        """Build continue command for Codex.
-
-        Note: Codex session continuation requires the tool's native session ID.
-        """
-        del session_id  # Codex uses tool_session_id for resume
-        cmd = self._base_command(profile)
+        del session_id
+        cmd = self._base_command(profile, runtime_dir)
         if tool_session_id:
             cmd.extend(["--resume", tool_session_id])
         cmd.extend(extra_args)
@@ -176,22 +168,17 @@ class CodexAdapter(LaunchAdapter):
         self,
         profile: ProfileSpec,
         parent_session_id: str,
-        child_session_id: str,  # noqa: ARG002 - Codex doesn't support fork
+        child_session_id: str,  # noqa: ARG002
         parent_tool_session_id: Optional[str],
+        runtime_dir: Path,
         extra_args: List[str],
     ) -> LaunchSpec:
-        """Build fork command for Codex.
-
-        Note: Codex may not support fork semantics directly.
-        This falls back to continue behavior.
-        """
-        del child_session_id  # Codex doesn't support fork - falls back to continue
+        del child_session_id
         return self.build_continue_command(
-            profile, parent_session_id, parent_tool_session_id, extra_args
+            profile, parent_session_id, parent_tool_session_id, runtime_dir, extra_args
         )
 
 
-# Registry of available adapters
 _ADAPTERS: Dict[str, Type[LaunchAdapter]] = {
     "claude": ClaudeAdapter,
     "codex": CodexAdapter,
@@ -199,17 +186,7 @@ _ADAPTERS: Dict[str, Type[LaunchAdapter]] = {
 
 
 def get_adapter(tool: str) -> LaunchAdapter:
-    """Get the launch adapter for a tool.
-
-    Args:
-        tool: Tool identifier (e.g., 'claude', 'codex')
-
-    Returns:
-        Instantiated adapter for the tool
-
-    Raises:
-        ValueError: If no adapter exists for the tool
-    """
+    """Get the launch adapter for a tool."""
     adapter_cls = _ADAPTERS.get(tool)
     if adapter_cls is None:
         available = ", ".join(sorted(_ADAPTERS.keys()))

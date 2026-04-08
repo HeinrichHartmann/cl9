@@ -243,18 +243,19 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Launching agent in project: agent-project", result.output)
         self.assertEqual(captured["cwd"], str(nested_dir.resolve()))
-        self.assertEqual(captured["env"]["CL9_PROJECT"], "agent-project")
-        self.assertEqual(captured["env"]["CL9_PROJECT_PATH"], str(project_dir.resolve()))
-        self.assertEqual(captured["env"]["CL9_ACTIVE"], "1")
+        self.assertEqual(captured["env"]["CL9_PROJECT_ROOT"], str(project_dir.resolve()))
+        self.assertEqual(captured["env"]["CL9_PROFILE_NAME"], "default")
         self.assertEqual(captured["env"]["CL9_SESSION_ID"], "12345678-1234-5678-1234-567812345678")
-        self.assertEqual(captured["env"]["CL9_PROFILE"], "default")
+        self.assertEqual(captured["env"]["CL9_SESSION_NAME"], "")
+        self.assertNotIn("CL9_PROJECT", captured["env"])
+        self.assertNotIn("CL9_ACTIVE", captured["env"])
         self.assertTrue(captured["env"]["PATH"].startswith(str((project_dir / "bin").resolve())))
         self.assertEqual(captured["argv"][1], "-ic")
-        self.assertIn("claude --setting-sources user", captured["argv"][2])
+        self.assertIn("claude --bare", captured["argv"][2])
         self.assertIn("--append-system-prompt-file", captured["argv"][2])
-        self.assertIn("default/CLAUDE.md", captured["argv"][2])
+        self.assertIn("CLAUDE.md", captured["argv"][2])
         self.assertIn("--settings", captured["argv"][2])
-        self.assertIn("default/settings.json", captured["argv"][2])
+        self.assertIn("settings.json", captured["argv"][2])
         self.assertIn("--session-id 12345678-1234-5678-1234-567812345678", captured["argv"][2])
 
     def test_agent_without_subcommand_shows_help(self):
@@ -322,10 +323,10 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0)
         self.assertFalse((project_dir / ".cl9" / "profiles").exists())
-        self.assertEqual(captured["env"]["CL9_PROFILE"], "codex")
-        self.assertEqual(captured["env"]["CL9_TOOL"], "codex")
-        # Codex adapter uses --instructions pointing at the built-in profile
-        self.assertIn("codex/INSTRUCTIONS.md", captured["argv"][2])
+        self.assertEqual(captured["env"]["CL9_PROFILE_NAME"], "codex")
+        # Codex adapter uses --instructions pointing at the runtime dir
+        self.assertIn("INSTRUCTIONS.md", captured["argv"][2])
+        self.assertIn("runtime", captured["argv"][2])
 
     def test_agent_spawn_errors_outside_project(self):
         outside_dir = self.work_dir / "outside"
@@ -379,8 +380,8 @@ class CliTests(unittest.TestCase):
             }
         )
         env = os.environ.copy()
-        env["CL9_PROJECT"] = "demo"
-        env["CL9_PROFILE"] = "careful"
+        env["CL9_PROJECT_ROOT"] = "/work/demo"
+        env["CL9_PROFILE_NAME"] = "careful"
 
         result = subprocess.run(
             [sys.executable, str(script_path)],
@@ -415,7 +416,7 @@ class CliTests(unittest.TestCase):
             }
         )
         env = os.environ.copy()
-        env["CL9_PROJECT"] = "demo"
+        env["CL9_PROJECT_ROOT"] = "/work/demo"
 
         result = subprocess.run(
             [sys.executable, str(script_path)],

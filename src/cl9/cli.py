@@ -2,18 +2,27 @@
 
 import json
 import os
+import runpy
 import shlex
 import subprocess
 import sys
 import uuid
 from pathlib import Path
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import click
 from click.shell_completion import CompletionItem
 
+import cl9.agent as _agent
+
 from .adapters import get_adapter_for_profile
 from .config import config
+from .runtime import (
+    materialize_profile_into_runtime,
+    remove_runtime,
+    runtime_dir_for,
+    write_agent_config,
+)
 from .environments import (
     apply_environment,
     build_template_variables,
@@ -746,23 +755,95 @@ def enter(target, force_name, force_path):
     _enter_command(target, force_name, force_path)
 
 
+def _run_spawn_pipeline(
+    project_root: Path,
+    profile_name: str,
+    session_id: str,
+    session_name: Optional[str],
+    spawn_cwd: Path,
+) -> Tuple[ProfileSpec, Path]:
+    """Execute ADR 0009 spawn pipeline steps 1-6.
+
+    Returns (profile, runtime_dir). The caller builds the launch command
+    using the appropriate adapter method and then calls _launch_agent_process.
+    """
+    # Step 1: Resolve built-in profile
+    profile = _resolve_agent_profile(profile_name)
+
+    # Step 2: Create runtime directory
+    runtime_dir = runtime_dir_for(project_root, session_id)
+    runtime_dir.mkdir(parents=True)
+
+    try:
+        # Step 3: Raw-copy non-config profile files into runtime dir
+        materialize_profile_into_runtime(profile, runtime_dir)
+
+        # Step 4: Load profile baselines and initialise cl9.agent state
+        settings_baseline: dict = {}
+        mcp_baseline: dict = {}
+        if profile.settings_json.is_file():
+            with open(profile.settings_json) as f:
+                settings_baseline = json.load(f)
+        if profile.mcp_json.is_file():
+            with open(profile.mcp_json) as f:
+                mcp_baseline = json.load(f)
+
+        _agent._reset(
+            project_root=project_root,
+            profile_name=profile.name,
+            profile_dir=profile.path,
+            runtime_dir=runtime_dir,
+            session_id=session_id,
+            session_name=session_name,
+            settings_baseline=settings_baseline,
+            mcp_baseline=mcp_baseline,
+        )
+
+        # Step 5: Run project-local init.py if present
+        init_path = project_root / ".cl9" / "init" / "init.py"
+        if init_path.is_file():
+            prev_cwd = Path.cwd()
+            os.chdir(spawn_cwd)
+            try:
+                runpy.run_path(str(init_path), run_name="__cl9_init__")
+            except SystemExit as exc:
+                if exc.code:
+                    raise
+            finally:
+                os.chdir(prev_cwd)
+
+        # Step 6: Serialize cl9.agent config into runtime dir
+        write_agent_config(runtime_dir)
+
+    except BaseException:
+        remove_runtime(project_root, session_id)
+        raise
+
+    return profile, runtime_dir
+
+
 def _launch_agent_process(
     project_root: Path,
     session_id: str,
     session_name: Union[str, None],
     profile: ProfileSpec,
+    runtime_dir: Path,
     cmd: List[str],
 ) -> None:
     """Launch an agent process and update project-local session state."""
-    project_name = _load_local_project_name(project_root)
-    env = _project_context_env(project_root, project_name)
+    env = os.environ.copy()
+    env.update(_agent.env)
+    # Prepend project bin/ to PATH
+    project_bin = str(project_root / "bin")
+    env["PATH"] = f"{project_bin}:{env['PATH']}" if env.get("PATH") else project_bin
+    env["CL9_PROJECT_ROOT"] = str(project_root)
+    env["CL9_PROFILE_NAME"] = profile.name
+    env["CL9_RUNTIME_DIR"] = str(runtime_dir)
     env["CL9_SESSION_ID"] = session_id
-    env["CL9_PROFILE"] = profile.name
-    env["CL9_TOOL"] = profile.tool
-    if session_name:
-        env["CL9_SESSION_NAME"] = session_name
+    env["CL9_SESSION_NAME"] = session_name or ""
 
     state = _project_state(project_root)
+    project_name = _load_local_project_name(project_root)
     current_cwd = Path.cwd().resolve()
     process_id = state.start_process(session_id, current_cwd, cmd)
 
@@ -772,7 +853,7 @@ def _launch_agent_process(
     if session_name:
         click.echo(f"Name: {session_name}")
     click.echo(f"Profile: {profile.name}")
-    click.echo(f"Tool: {profile.tool}")
+    click.echo(f"Runtime: {runtime_dir}")
     click.echo()
 
     try:
@@ -819,28 +900,20 @@ def agent_spawn(session_name, profile_name, agent_args):
         return
 
     resolved_profile_name = profile_name or _default_profile_name(project_root)
-    profile = _resolve_agent_profile(resolved_profile_name)
-    adapter = get_adapter_for_profile(profile)
-
     session_id = str(uuid.uuid4())
-    launch_spec = adapter.build_spawn_command(profile, session_id, list(agent_args))
+    spawn_cwd = Path.cwd().resolve()
 
+    profile, runtime_dir = _run_spawn_pipeline(
+        project_root, resolved_profile_name, session_id, session_name, spawn_cwd
+    )
+    adapter = get_adapter_for_profile(profile)
+    launch_spec = adapter.build_spawn_command(profile, session_id, runtime_dir, list(agent_args))
+
+    # Step 7: write session row after successful pipeline
     state = _project_state(project_root)
-    state.create_session(
-        session_id,
-        session_name,
-        resolved_profile_name,
-        profile.tool,
-        Path.cwd(),
-    )
+    state.create_session(session_id, session_name, resolved_profile_name, profile.tool, spawn_cwd)
 
-    _launch_agent_process(
-        project_root,
-        session_id,
-        session_name,
-        profile,
-        launch_spec.command,
-    )
+    _launch_agent_process(project_root, session_id, session_name, profile, runtime_dir, launch_spec.command)
 
 
 @agent.command("continue")
@@ -860,19 +933,15 @@ def agent_continue(target, agent_args):
 
     profile = _resolve_agent_profile(session.profile)
     adapter = get_adapter_for_profile(profile)
+    runtime_dir = runtime_dir_for(project_root, session.session_id)
 
-    # For tools like Codex, we need the tool_session_id from session metadata
     tool_session_id = session.metadata.get("tool_session_id") if session.metadata else None
     launch_spec = adapter.build_continue_command(
-        profile, session.session_id, tool_session_id, list(agent_args)
+        profile, session.session_id, tool_session_id, runtime_dir, list(agent_args)
     )
 
     _launch_agent_process(
-        project_root,
-        session.session_id,
-        session.name,
-        profile,
-        launch_spec.command,
+        project_root, session.session_id, session.name, profile, runtime_dir, launch_spec.command
     )
 
 
@@ -891,15 +960,16 @@ def agent_fork(target, session_name, profile_name, agent_args):
         raise click.ClickException(str(exc)) from exc
 
     resolved_profile_name = profile_name or parent.profile
-    profile = _resolve_agent_profile(resolved_profile_name)
-    adapter = get_adapter_for_profile(profile)
-
     child_session_id = str(uuid.uuid4())
+    spawn_cwd = Path.cwd().resolve()
 
-    # For tools like Codex, we need the parent's tool_session_id
+    profile, runtime_dir = _run_spawn_pipeline(
+        project_root, resolved_profile_name, child_session_id, session_name, spawn_cwd
+    )
+    adapter = get_adapter_for_profile(profile)
     parent_tool_session_id = parent.metadata.get("tool_session_id") if parent.metadata else None
     launch_spec = adapter.build_fork_command(
-        profile, parent.session_id, child_session_id, parent_tool_session_id, list(agent_args)
+        profile, parent.session_id, child_session_id, parent_tool_session_id, runtime_dir, list(agent_args)
     )
 
     state.create_session(
@@ -907,16 +977,12 @@ def agent_fork(target, session_name, profile_name, agent_args):
         session_name,
         resolved_profile_name,
         profile.tool,
-        Path.cwd(),
+        spawn_cwd,
         forked_from_session_id=parent.session_id,
     )
 
     _launch_agent_process(
-        project_root,
-        child_session_id,
-        session_name,
-        profile,
-        launch_spec.command,
+        project_root, child_session_id, session_name, profile, runtime_dir, launch_spec.command
     )
 
 
