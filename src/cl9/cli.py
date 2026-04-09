@@ -4,6 +4,7 @@ import json
 import os
 import runpy
 import shlex
+import shutil
 import subprocess
 import sys
 import uuid
@@ -153,6 +154,19 @@ def _default_profile_name(project_path: Path) -> str:
     return project_config.get("default_profile", "default")
 
 
+def _agent_command(project_path: Path) -> Optional[str]:
+    """Return the project's custom agent command, or None for the default.
+
+    When set, ``agent_command`` replaces the executable portion of the
+    launch command. It is expanded by the shell, so ``$CL9_PROJECT_ROOT``
+    and other ``CL9_*`` env vars are available. Example::
+
+        "agent_command": "direnv exec $CL9_PROJECT_ROOT claude"
+    """
+    project_config = _load_local_project_config(project_path)
+    return project_config.get("agent_command")
+
+
 def _project_context_env(project_path: Path, project_name: str) -> dict:
     """Build the shared project execution environment."""
     env = os.environ.copy()
@@ -223,14 +237,19 @@ def _planned_environment_paths(project_path: Path, env_spec) -> Tuple[List[Path]
 
 
 def _fail_on_init_conflicts(project_path: Path, env_spec) -> None:
-    """Abort init if the target directory already contains conflicting paths."""
-    planned_dirs, planned_files = _planned_environment_paths(project_path, env_spec)
-    conflicts = [path for path in planned_dirs + planned_files if path.exists()]
+    """Abort init if the target directory already contains conflicting files.
+
+    Only files are treated as conflicts. Directories (src/, doc/, data/,
+    .cl9/) are safe to create with exist_ok=True, and pre-existing ones
+    must not block initialization of an existing project tree.
+    """
+    _, planned_files = _planned_environment_paths(project_path, env_spec)
+    conflicts = [path for path in planned_files if path.exists()]
 
     if not conflicts:
         return
 
-    click.echo("Error: Cannot initialize because these paths already exist:", err=True)
+    click.echo("Error: Cannot initialize because these files already exist:", err=True)
     for conflict in sorted(conflicts):
         rel_path = conflict.relative_to(project_path)
         click.echo(f"  {rel_path}", err=True)
@@ -477,7 +496,7 @@ def _initialize_project(project_path: Path, project_name: str, env_type: str) ->
     _fail_on_init_conflicts(project_path, env_spec)
 
     cl9_dir = project_path / ".cl9"
-    cl9_dir.mkdir(parents=True)
+    cl9_dir.mkdir(parents=True, exist_ok=True)
 
     project_config = {
         "name": project_name,
@@ -926,6 +945,12 @@ def _launch_agent_process(
     env["CL9_SESSION_ID"] = session_id
     env["CL9_SESSION_NAME"] = session_name or ""
 
+    # If the project defines agent_command, it replaces the executable
+    # (cmd[0]). The agent_command string is embedded raw in the shell
+    # script so that $CL9_PROJECT_ROOT and friends are expanded by the
+    # shell; only the adapter args (paths, flags) are shlex-quoted.
+    agent_cmd = _agent_command(project_root)
+
     state = _project_state(project_root)
     project_name = _load_local_project_name(project_root)
     current_cwd = (launch_cwd or Path.cwd()).resolve()
@@ -940,11 +965,21 @@ def _launch_agent_process(
     click.echo(f"Runtime: {runtime_dir}")
     if verbose:
         click.echo(f"CWD:     {current_cwd}")
-        click.echo(f"Command: {' '.join(cmd)}")
+        if agent_cmd:
+            click.echo(f"Command: {agent_cmd} {shlex.join(cmd[1:])}")
+        else:
+            click.echo(f"Command: {shlex.join(cmd)}")
     click.echo()
 
     try:
-        process = _spawn_in_project_shell(current_cwd, env, cmd)
+        if agent_cmd:
+            # Embed agent_command raw (shell-expanded), quote only adapter args.
+            shell = _shell_executable(env)
+            adapter_args = shlex.join(cmd[1:])
+            script = f"cd {shlex.quote(str(current_cwd))} && exec {agent_cmd} {adapter_args}"
+            process = subprocess.Popen([shell, "-ic", script], env=env)
+        else:
+            process = _spawn_in_project_shell(current_cwd, env, cmd)
         state.mark_process_running(process_id, process.pid)
         exit_code = process.wait()
     except OSError as exc:
@@ -1245,11 +1280,31 @@ def profile_list():
         click.echo(f"  {p.name:<{name_w}}  {p.tool:<{tool_w}}  {source:<{source_w}}  {p.path}")
 
 
-@profile.command("add")
+def _copy_profile_tree(src: Path, dest: Path) -> None:
+    """Copy a profile directory tree into ``dest``.
+
+    The source is copied by value (``shutil.copytree``) so the installed
+    profile is a standalone snapshot; subsequent edits in ``src`` do not
+    affect the registered profile until the user re-imports. Symlinks
+    inside the source are followed so the destination contains real files.
+    """
+    shutil.copytree(src, dest, symlinks=False, dirs_exist_ok=False)
+
+
+@profile.command("import")
 @click.argument("directory", type=click.Path(exists=True, file_okay=False, resolve_path=True))
 @click.option("--name", default=None, help="Profile name (defaults to directory basename).")
-def profile_add(directory, name):
-    """Register a local profile directory under ~/.cl9/profiles/."""
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Replace an existing profile with the same name.",
+)
+def profile_import(directory, name, force):
+    """Import a local profile directory into ~/.cl9/profiles/ by copy.
+
+    The source tree is snapshotted at import time — later changes in the
+    source do not propagate. Re-run with ``--force`` to refresh.
+    """
     src = Path(directory)
     profile_name = name or src.name
 
@@ -1262,36 +1317,18 @@ def profile_add(directory, name):
     USER_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
 
     if dest.exists() or dest.is_symlink():
-        raise click.ClickException(
-            f"Profile '{profile_name}' already exists at {dest}. "
-            f"Use 'cl9 profile update' to replace it."
-        )
+        if not force:
+            raise click.ClickException(
+                f"Profile '{profile_name}' already exists at {dest}. "
+                f"Re-run with --force to replace it."
+            )
+        if dest.is_symlink() or dest.is_file():
+            dest.unlink()
+        else:
+            shutil.rmtree(dest)
 
-    dest.symlink_to(src)
-    click.echo(f"Added profile '{profile_name}' → {src}")
-
-
-@profile.command("update")
-@click.argument("name")
-@click.argument("directory", type=click.Path(exists=True, file_okay=False, resolve_path=True))
-def profile_update(name, directory):
-    """Replace an existing user-local profile's target directory."""
-    src = Path(directory)
-
-    if not (src / "manifest.json").is_file():
-        raise click.ClickException(
-            f"'{src}' has no manifest.json — is this a cl9 profile directory?"
-        )
-
-    dest = USER_PROFILES_DIR / name
-    if not dest.exists() and not dest.is_symlink():
-        raise click.ClickException(
-            f"Profile '{name}' not found. Use 'cl9 profile add' to register a new one."
-        )
-
-    dest.unlink()
-    dest.symlink_to(src)
-    click.echo(f"Updated profile '{name}' → {src}")
+    _copy_profile_tree(src, dest)
+    click.echo(f"Imported profile '{profile_name}' ← {src}")
 
 
 @main.group(invoke_without_command=True)

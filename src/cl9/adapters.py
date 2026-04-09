@@ -66,8 +66,16 @@ class ClaudeAdapter(LaunchAdapter):
     tool_name = "claude"
 
     def _base_command(self, profile: ProfileSpec, runtime_dir: Path) -> List[str]:
-        """Build the sealed base command pointing at the session runtime dir."""
-        cmd = [profile.executable, "--bare"]
+        """Build the base command pointing at the session runtime dir.
+
+        Note: we intentionally do NOT use ``--bare``. Bare mode strips
+        MCP servers, hooks, skills, statusline, and most tools — it is
+        designed for scripted one-shot ``claude -p`` calls, not
+        interactive agent sessions. Our settings and MCP config are
+        injected via ``--settings`` / ``--mcp-config`` which merge on
+        top of Claude Code's normal discovery chain.
+        """
+        cmd = [profile.executable]
 
         claude_md = runtime_dir / "CLAUDE.md"
         if claude_md.is_file():
