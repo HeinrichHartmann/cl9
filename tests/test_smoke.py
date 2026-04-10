@@ -143,5 +143,104 @@ class SpawnSmokeTests(unittest.TestCase):
         self.assertIn("cl9", result.stdout.lower().replace("\033", ""))
 
 
+def _claude_available() -> bool:
+    return shutil.which("claude") is not None
+
+
+@unittest.skipUnless(_claude_available(), "claude not installed")
+class ClaudeLiveSmokeTests(unittest.TestCase):
+    """Smoke tests that call claude directly via cl9 spawn -- -p.
+
+    These hit the real API. If auth fails, log in once via:
+        cl9 agent spawn   (in any cl9 project)
+    then re-run the tests.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="cl9-live-")
+        self.cl9 = shutil.which("cl9")
+        if not self.cl9:
+            self.skipTest("cl9 not installed")
+        # Init a minimal project
+        result = _run(f"{self.cl9} init {self.tmpdir} --name livetest --type minimal")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _spawn_print(self, prompt: str, extra_flags: str = "") -> subprocess.CompletedProcess:
+        """Spawn cl9 agent with -p (print mode) and return the result."""
+        cmd = (
+            f"cd {self.tmpdir} && "
+            f"{self.cl9} agent spawn {extra_flags} "
+            f"-- -p --output-format json '{prompt}'"
+        )
+        return _run(cmd, timeout=60)
+
+    def test_auth_works_without_bare(self):
+        """Agent should authenticate via keychain (no --bare, no API key needed).
+
+        If this fails with an auth error, log in once:
+            cd /tmp && cl9 init . --type minimal && cl9 agent spawn
+        """
+        result = self._spawn_print("Reply with exactly: PONG")
+        if result.returncode != 0 and "auth" in result.stderr.lower():
+            self.fail(
+                "Auth failed. Please log in once by running:\n"
+                "    cl9 agent spawn\n"
+                "in any cl9 project, then re-run this test."
+            )
+        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
+        self.assertIn("PONG", result.stdout)
+
+    def test_claude_responds_correctly(self):
+        """Claude should return a correct, verifiable answer."""
+        result = self._spawn_print(
+            "What is 7 * 6? Reply with ONLY the number, nothing else."
+        )
+        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
+        # Parse JSON output
+        try:
+            data = json.loads(result.stdout)
+            response_text = data.get("result", "")
+        except json.JSONDecodeError:
+            response_text = result.stdout
+        self.assertIn("42", response_text)
+
+    def test_statusline_in_settings(self):
+        """Default profile should inject a statusline command into settings."""
+        # Spawn with default profile (not minimal) to get statusline
+        shutil.rmtree(self.tmpdir)
+        self.tmpdir = tempfile.mkdtemp(prefix="cl9-live-sl-")
+        _run(f"{self.cl9} init {self.tmpdir} --name sltest --type minimal")
+
+        # Use default profile which has statusline in settings.json
+        result = self._spawn_print(
+            "Reply with exactly: OK",
+            extra_flags="-p default",
+        )
+        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
+
+        # Verify the runtime dir was created with settings.json containing statusline
+        cl9_dir = Path(self.tmpdir) / ".cl9" / "sessions"
+        if cl9_dir.exists():
+            session_dirs = list(cl9_dir.iterdir())
+            self.assertTrue(len(session_dirs) > 0, "No session directories created")
+            runtime_dir = session_dirs[0] / "runtime"
+            settings_file = runtime_dir / "settings.json"
+            if settings_file.exists():
+                settings = json.loads(settings_file.read_text())
+                self.assertIn("statusLine", settings)
+                self.assertEqual(settings["statusLine"]["type"], "command")
+                # Verify the statusline command points to an existing file
+                cmd_path = settings["statusLine"]["command"]
+                # The command references ${CL9_RUNTIME_DIR} which claude expands
+                resolved = cmd_path.replace("${CL9_RUNTIME_DIR}", str(runtime_dir))
+                self.assertTrue(
+                    Path(resolved).exists(),
+                    f"Statusline script not found at {resolved}",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

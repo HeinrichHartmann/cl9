@@ -44,27 +44,39 @@ This is the **materialized session state** — a per-session snapshot derived fr
 
 The runtime directory is built once, at spawn time. It is never rebuilt on resume.
 
-### Sealed sessions: claude adapter
+### Config isolation: claude adapter
 
-cl9 launches claude with `claude --bare`. Under this flag, claude ignores settings, hooks, plugin sync, keychain reads, and `CLAUDE.md` auto-discovery from `~/.claude/`. Anthropic auth comes strictly from `ANTHROPIC_API_KEY` in the process env or from an `apiKeyHelper` command in `settings.json`. All context — system prompt, settings, MCP configuration — must be passed explicitly as flags.
+cl9 does **not** use `claude --bare`. The `--bare` flag was designed for headless/CI use (`--print` mode) and disables too much for interactive sessions: hooks, LSP, auto-memory, and — critically — OAuth keychain auth. Interactive agents need these features.
 
-The launch invocation looks like:
+Instead, cl9 uses **targeted override flags** to control the config surface while letting auth and interactive features pass through from the user's normal `~/.claude/` environment:
 
 ```
-claude --bare \
-  --session-id                <cl9-session-id> \
+claude \
+  --setting-sources ""                              \
+  --session-id                <cl9-session-id>      \
   --settings                  <runtime>/settings.json \
-  --mcp-config                <runtime>/mcp.json \
+  --strict-mcp-config                               \
+  --mcp-config                <runtime>/mcp.json    \
   --append-system-prompt-file <runtime>/CLAUDE.md
 ```
 
+The isolation strategy is:
+
+| Concern | Flag | Effect |
+|---------|------|--------|
+| Settings | `--setting-sources ""` + `--settings <file>` | Suppresses user/project settings; only the profile's settings are loaded |
+| MCP servers | `--strict-mcp-config` + `--mcp-config <file>` | Only MCP servers from the profile are used |
+| System prompt | `--append-system-prompt-file <file>` | Profile's CLAUDE.md is appended to the agent's prompt |
+| Auth | *(no flag)* | OAuth tokens flow from macOS Keychain as normal — user logs in once |
+| Hooks, LSP, auto-memory | *(no flag)* | Remain active for interactive use |
+
+**CLAUDE.md auto-discovery** from `~/.claude/` and parent directories is not suppressed. This is accepted: global CLAUDE.md files are user preferences (safety guidelines, style rules) that should layer underneath the profile's instructions, not be hidden from the agent.
+
 `cl9 agent continue` launches the identical invocation against the same runtime directory, with `--resume <session-id>` appended, from the captured spawn cwd. `cl9 agent fork` runs the full spawn pipeline (fresh runtime, fresh init) and adds claude's `--fork-session` flag.
 
-**Per-adapter sealing.** The `--bare` model is claude-specific. Each launch adapter (ADR 0008) owns its own mapping from `cl9.agent` state and runtime-dir files to its CLI flags, and its own sealing story. Adapters for tools without an equivalent to `--bare` have weaker isolation guarantees; that is a property of the tool, not of cl9.
+**Per-adapter isolation.** Each launch adapter (ADR 0008) owns its own mapping from `cl9.agent` state and runtime-dir files to its CLI flags, and its own isolation strategy. The targeted-override approach is claude-specific; other adapters use whatever mechanisms their tool provides.
 
-**Tolerated leak.** Even under `--bare`, claude writes session transcripts to `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. That is the mechanism that makes `claude --resume` work, and cl9's resume path depends on it. The invariant cl9 cares about is one-directional: claude must not *read* auth or config from `~/.claude/`. History writes are fine.
-
-We recommend keeping all configuration in the project (via profile + `init.py`) and leaving `~/.claude/` free of manual edits.
+**Session transcripts.** Claude writes session transcripts to `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. That is the mechanism that makes `claude --resume` work, and cl9's resume path depends on it.
 
 ### The `cl9.agent` module
 
@@ -259,7 +271,7 @@ The following are explicitly out of scope for this ADR, so a reader knows where 
 
 ## References
 
-- `claude --help` — `--bare` flag semantics and auth behavior
+- `claude --help` — `--setting-sources`, `--strict-mcp-config`, and other override flags
 - ADR 0008 — Profile-Bound Agent Executables
 - GitHub Issue #2 — Stale agent profiles after cl9 upgrade
 - GitHub Issue #3 — Poor session overview and resume UX

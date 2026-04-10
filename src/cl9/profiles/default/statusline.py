@@ -84,26 +84,26 @@ def to_int(value: object) -> int:
         return 0
 
 
-def context_percentage(context: dict) -> int:
-    """Return a robust context percentage for Claude payloads."""
+def context_stats(context: dict) -> tuple[int, int]:
+    """Return (used_tokens, used_percentage) from a Claude context payload."""
+    current_usage = context.get("current_usage") or {}
+    used_tokens = 0
+    if isinstance(current_usage, dict):
+        used_tokens = (
+            to_int(current_usage.get("input_tokens"))
+            + to_int(current_usage.get("cache_creation_input_tokens"))
+            + to_int(current_usage.get("cache_read_input_tokens"))
+        )
+
     used_pct = to_int(context.get("used_percentage"))
     if used_pct > 0:
-        return min(100, used_pct)
+        return used_tokens, min(100, used_pct)
 
     window_size = to_int(context.get("context_window_size"))
-    current_usage = context.get("current_usage") or {}
-    if window_size <= 0 or not isinstance(current_usage, dict):
-        return max(0, min(100, used_pct))
+    if window_size > 0 and used_tokens > 0:
+        return used_tokens, min(100, int((used_tokens * 100) / window_size))
 
-    used_tokens = (
-        to_int(current_usage.get("input_tokens"))
-        + to_int(current_usage.get("cache_creation_input_tokens"))
-        + to_int(current_usage.get("cache_read_input_tokens"))
-    )
-    if used_tokens <= 0:
-        return max(0, min(100, used_pct))
-
-    return min(100, int((used_tokens * 100) / window_size))
+    return used_tokens, max(0, min(100, used_pct))
 
 
 _MODEL_PREFIX = re.compile(r"^(bedrock/)?(anthropic\.)?")
@@ -157,22 +157,42 @@ def main() -> int:
     model = short_model(raw_model)
     session = data.get("session_name") or profile
     context = data.get("context_window", {})
-    used_pct = context_percentage(context)
+    used_tokens, used_pct = context_stats(context)
     window_size = to_int(context.get("context_window_size"))
     cost = float(data.get("cost", {}).get("total_cost_usd", 0) or 0)
+    rate_limits = data.get("rate_limits") or {}
 
     cl9_badge = color("cl9", DIM)
     project_text = color(project, CYAN)
     session_text = color(session, DIM)
     model_text = color(model, model_color(raw_model))
 
+    # Context window usage
     bar = context_bar(used_pct)
-    usage = f"{bar} {used_pct:>3}%"
     if window_size > 0:
-        usage = f"{usage} / {human_tokens(window_size)}"
-    usage_text = color(usage, context_color(used_pct))
+        ctx_usage = f"{bar} {human_tokens(used_tokens)}/{human_tokens(window_size)} {used_pct}%"
+    elif used_tokens > 0:
+        ctx_usage = f"{bar} {human_tokens(used_tokens)} {used_pct}%"
+    else:
+        ctx_usage = f"{bar} {used_pct}%"
+    usage_text = color(ctx_usage, context_color(used_pct))
+
+    # Rate-limit budget (5h / 7d)
+    budget_parts: list[str] = []
+    five_h = rate_limits.get("five_hour") or {}
+    seven_d = rate_limits.get("seven_day") or {}
+    five_h_pct = to_int(five_h.get("used_percentage"))
+    seven_d_pct = to_int(seven_d.get("used_percentage"))
+    if five_h_pct or seven_d_pct:
+        budget_parts.append(
+            color(f"5h {five_h_pct}%", context_color(five_h_pct))
+        )
+        budget_parts.append(
+            color(f"7d {seven_d_pct}%", context_color(seven_d_pct))
+        )
 
     parts = [f"{cl9_badge} {project_text}", session_text, model_text, usage_text]
+    parts.extend(budget_parts)
     if cost > 0:
         parts.append(color(f"${cost:.2f}", DIM))
 
