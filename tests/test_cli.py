@@ -375,14 +375,10 @@ class CliTests(unittest.TestCase):
         with patch.object(cli_module.uuid, "uuid4", return_value=uuid.UUID("abababab-abab-abab-abab-abababababab")):
             result, captured = self._invoke_agent(["agent", "spawn", "--profile", "codex"])
 
-        sid = "abababab-abab-abab-abab-abababababab"
-        from cl9.runtime import runtime_dir_for
-        expected_instructions = str(runtime_dir_for(project_dir, sid) / "INSTRUCTIONS.md")
-
         self.assertEqual(result.exit_code, 0)
         self.assertFalse((project_dir / ".cl9" / "profiles").exists())
         self.assertEqual(captured["env"]["CL9_PROFILE_NAME"], "codex")
-        self.assertIn(expected_instructions, captured["argv"][2])
+        self.assertIn("-c 'instructions=", captured["argv"][2])
 
     def test_agent_spawn_errors_outside_project(self):
         outside_dir = self.work_dir / "outside"

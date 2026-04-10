@@ -142,7 +142,9 @@ class CodexAdapter(LaunchAdapter):
         cmd = [profile.executable]
         instructions = runtime_dir / "INSTRUCTIONS.md"
         if instructions.is_file():
-            cmd.extend(["--instructions", str(instructions)])
+            text = instructions.read_text().strip()
+            if text:
+                cmd.extend(["-c", f"instructions={text}"])
         return cmd
 
     def build_spawn_command(

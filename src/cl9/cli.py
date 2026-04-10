@@ -154,18 +154,6 @@ def _default_profile_name(project_path: Path) -> str:
     return project_config.get("default_profile", "default")
 
 
-def _agent_command(project_path: Path) -> Optional[str]:
-    """Return the project's custom agent command, or None for the default.
-
-    When set, ``agent_command`` replaces the executable portion of the
-    launch command. It is expanded by the shell, so ``$CL9_PROJECT_ROOT``
-    and other ``CL9_*`` env vars are available. Example::
-
-        "agent_command": "direnv exec $CL9_PROJECT_ROOT claude"
-    """
-    project_config = _load_local_project_config(project_path)
-    return project_config.get("agent_command")
-
 
 def _project_context_env(project_path: Path, project_name: str) -> dict:
     """Build the shared project execution environment."""
@@ -945,12 +933,6 @@ def _launch_agent_process(
     env["CL9_SESSION_ID"] = session_id
     env["CL9_SESSION_NAME"] = session_name or ""
 
-    # If the project defines agent_command, it replaces the executable
-    # (cmd[0]). The agent_command string is embedded raw in the shell
-    # script so that $CL9_PROJECT_ROOT and friends are expanded by the
-    # shell; only the adapter args (paths, flags) are shlex-quoted.
-    agent_cmd = _agent_command(project_root)
-
     state = _project_state(project_root)
     project_name = _load_local_project_name(project_root)
     current_cwd = (launch_cwd or Path.cwd()).resolve()
@@ -965,21 +947,11 @@ def _launch_agent_process(
     click.echo(f"Runtime: {runtime_dir}")
     if verbose:
         click.echo(f"CWD:     {current_cwd}")
-        if agent_cmd:
-            click.echo(f"Command: {agent_cmd} {shlex.join(cmd[1:])}")
-        else:
-            click.echo(f"Command: {shlex.join(cmd)}")
+        click.echo(f"Command: {shlex.join(cmd)}")
     click.echo()
 
     try:
-        if agent_cmd:
-            # Embed agent_command raw (shell-expanded), quote only adapter args.
-            shell = _shell_executable(env)
-            adapter_args = shlex.join(cmd[1:])
-            script = f"cd {shlex.quote(str(current_cwd))} && exec {agent_cmd} {adapter_args}"
-            process = subprocess.Popen([shell, "-ic", script], env=env)
-        else:
-            process = _spawn_in_project_shell(current_cwd, env, cmd)
+        process = _spawn_in_project_shell(current_cwd, env, cmd)
         state.mark_process_running(process_id, process.pid)
         exit_code = process.wait()
     except OSError as exc:
