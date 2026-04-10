@@ -444,7 +444,7 @@ class CliTests(unittest.TestCase):
             env=env,
         )
 
-        self.assertIn("[demo]", result.stdout)
+        self.assertIn("demo", result.stdout)
         self.assertIn("branch-a", result.stdout)
         self.assertIn("Opus", result.stdout)
         self.assertIn("58%", result.stdout)

@@ -27,6 +27,7 @@ Repository = "https://github.com/HeinrichHartmann/cl9"
 [dependency-groups]
 dev = [
     "ruff>=0.6.0",
+    "pytest>=8.0",
 ]
 
 [tool.hatch.build]
