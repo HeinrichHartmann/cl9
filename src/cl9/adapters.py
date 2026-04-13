@@ -66,14 +66,11 @@ class ClaudeAdapter(LaunchAdapter):
     tool_name = "claude"
 
     def _base_command(self, profile: ProfileSpec, runtime_dir: Path) -> List[str]:
-        """Build the base command pointing at the session runtime dir.
+        """Build the base command with targeted config overrides.
 
-        Note: we intentionally do NOT use ``--bare``. Bare mode strips
-        MCP servers, hooks, skills, statusline, and most tools — it is
-        designed for scripted one-shot ``claude -p`` calls, not
-        interactive agent sessions. Our settings and MCP config are
-        injected via ``--settings`` / ``--mcp-config`` which merge on
-        top of Claude Code's normal discovery chain.
+        Uses --settings and --strict-mcp-config to layer profile config
+        on top of Claude Code's normal discovery chain. No --bare, so
+        auth, hooks, LSP, statusline, and auto-memory all work.
         """
         cmd = [profile.executable]
 
@@ -87,7 +84,7 @@ class ClaudeAdapter(LaunchAdapter):
 
         mcp_file = runtime_dir / "mcp.json"
         if mcp_file.is_file():
-            cmd.extend(["--mcp-config", str(mcp_file)])
+            cmd.extend(["--strict-mcp-config", "--mcp-config", str(mcp_file)])
 
         return cmd
 
