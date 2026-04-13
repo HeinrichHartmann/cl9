@@ -68,14 +68,11 @@ class ClaudeAdapter(LaunchAdapter):
     def _base_command(self, profile: ProfileSpec, runtime_dir: Path) -> List[str]:
         """Build the base command with targeted config overrides.
 
-        Uses feature-specific flags (--settings, --strict-mcp-config,
-        --setting-sources) instead of --bare, so that auth, hooks, LSP,
-        and auto-memory continue to work in interactive sessions.
+        Uses --settings and --strict-mcp-config to layer profile config
+        on top of Claude Code's normal discovery chain. No --bare, so
+        auth, hooks, LSP, statusline, and auto-memory all work.
         """
         cmd = [profile.executable]
-
-        # Suppress user/project settings; only load from our explicit --settings
-        cmd.extend(["--setting-sources", ""])
 
         claude_md = runtime_dir / "CLAUDE.md"
         if claude_md.is_file():

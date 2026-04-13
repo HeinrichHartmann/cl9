@@ -34,13 +34,26 @@ def materialize_profile_into_runtime(profile: ProfileSpec, runtime_dir: Path) ->
         shutil.copymode(src, dest)
 
 
+def _resolve_runtime_vars(obj: object, runtime_dir: Path) -> object:
+    """Replace ${CL9_RUNTIME_DIR} with the actual path in nested structures."""
+    runtime_str = str(runtime_dir)
+    if isinstance(obj, str):
+        return obj.replace("${CL9_RUNTIME_DIR}", runtime_str)
+    if isinstance(obj, dict):
+        return {k: _resolve_runtime_vars(v, runtime_dir) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_resolve_runtime_vars(v, runtime_dir) for v in obj]
+    return obj
+
+
 def write_agent_config(runtime_dir: Path) -> None:
     """Serialize cl9.agent.settings and cl9.agent.mcp into the runtime directory."""
     import cl9.agent as agent
 
     if agent.settings:
+        resolved = _resolve_runtime_vars(agent.settings, runtime_dir)
         (runtime_dir / "settings.json").write_text(
-            json.dumps(agent.settings, indent=2)
+            json.dumps(resolved, indent=2)
         )
     if agent.mcp:
         (runtime_dir / "mcp.json").write_text(

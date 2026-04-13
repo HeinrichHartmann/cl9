@@ -282,7 +282,6 @@ class CliTests(unittest.TestCase):
         self.assertEqual(captured["argv"][1], "-ic")
         self.assertIn("claude", captured["argv"][2])
         self.assertNotIn("--bare", captured["argv"][2])
-        self.assertIn("--setting-sources", captured["argv"][2])
         self.assertIn("--append-system-prompt-file", captured["argv"][2])
         self.assertIn("CLAUDE.md", captured["argv"][2])
         self.assertIn("--settings", captured["argv"][2])
