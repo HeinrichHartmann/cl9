@@ -63,8 +63,11 @@ def write_agent_config(runtime_dir: Path) -> None:
 
 def remove_runtime(project_root: Path, session_id: str) -> None:
     """Remove the runtime directory and its session parent if empty. Idempotent."""
+    from .adapters import delete_keychain_credential
+
     runtime_dir = runtime_dir_for(project_root, session_id)
     if runtime_dir.exists():
+        delete_keychain_credential(runtime_dir)
         shutil.rmtree(runtime_dir)
 
     session_dir = runtime_dir.parent

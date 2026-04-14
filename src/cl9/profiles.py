@@ -67,6 +67,11 @@ class ProfileSpec:
         return self.path / "mcp.json"
 
     @property
+    def isolation(self) -> str:
+        """Return the isolation mode: 'compose' (default) or 'full'."""
+        return self.manifest.get("isolation", "compose")
+
+    @property
     def instructions_md(self) -> Path:
         """Return the profile's instructions file (for Codex-style agents)."""
         return self.path / "INSTRUCTIONS.md"
