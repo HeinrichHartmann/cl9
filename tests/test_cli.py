@@ -288,6 +288,27 @@ class CliTests(unittest.TestCase):
         self.assertIn("settings.json", captured["argv"][2])
         self.assertIn("--session-id 12345678-1234-5678-1234-567812345678", captured["argv"][2])
 
+    def test_agent_spawn_full_isolation_sets_claude_config_dir(self):
+        """isolation='full' profile sets CLAUDE_CONFIG_DIR instead of --settings."""
+        project_dir = self.work_dir / "agent-full"
+        project_dir.mkdir()
+        self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", "minimal"])
+        self._chdir(project_dir)
+
+        with patch.object(cli_module.uuid, "uuid4", return_value=uuid.UUID("12345678-1234-5678-1234-567812345678")), \
+             patch("cl9.adapters.copy_keychain_credential"):
+            result, captured = self._invoke_agent(["agent", "spawn", "-p", "default-full"])
+
+        self.assertEqual(result.exit_code, 0)
+        # CLAUDE_CONFIG_DIR should be set to the runtime dir
+        self.assertIn("CLAUDE_CONFIG_DIR", captured["env"])
+        runtime_dir = captured["env"]["CLAUDE_CONFIG_DIR"]
+        self.assertIn("12345678-1234-5678-1234-567812345678", runtime_dir)
+        # --settings flag must NOT be present (handled by CLAUDE_CONFIG_DIR)
+        self.assertNotIn("--settings", captured["argv"][2])
+        # --append-system-prompt-file still present for CLAUDE.md
+        self.assertIn("--append-system-prompt-file", captured["argv"][2])
+
     def test_agent_without_subcommand_shows_help(self):
         project_dir = self.work_dir / "agent-default"
         project_dir.mkdir()
@@ -388,7 +409,35 @@ class CliTests(unittest.TestCase):
         result = self.runner.invoke(cli_module.main, ["agent", "spawn"])
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Not inside a cl9 project", result.output)
+        self.assertIn("Not in a cl9 project directory", result.output)
+
+    def test_gc_nudge_appears_when_stale_sessions_exist(self):
+        """GC nudge is printed to stderr when sessions are overdue for pruning."""
+        from datetime import datetime, timedelta
+
+        project_dir = self.work_dir / "gc-nudge"
+        project_dir.mkdir()
+        self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", "minimal"])
+        self._chdir(project_dir)
+
+        # Spawn a session then manually backdate last_used_at so it looks stale
+        with patch.object(cli_module.uuid, "uuid4", return_value=uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")):
+            self._invoke_agent(["agent", "spawn"])
+
+        state_db = project_dir / ".cl9" / "state.db"
+        import sqlite3 as _sqlite3
+        stale_time = (datetime.now() - timedelta(days=10)).isoformat()
+        conn = _sqlite3.connect(str(state_db))
+        conn.execute("UPDATE agent_sessions SET status='idle', last_used_at=? WHERE session_id=?",
+                     (stale_time, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"))
+        conn.commit()
+        conn.close()
+
+        result = self.runner.invoke(cli_module.main, ["session", "list"], catch_exceptions=False)
+
+        # Nudge goes to stderr; CliRunner mixes stderr into output by default
+        self.assertIn("gc has not run in a while", result.output)
+        self.assertIn("1 stale session", result.output)
 
     def test_session_list_shows_project_local_sessions(self):
         project_dir = self.work_dir / "session-list"

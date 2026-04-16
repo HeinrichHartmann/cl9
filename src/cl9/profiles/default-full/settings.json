@@ -1,0 +1,6 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "${CL9_RUNTIME_DIR}/statusline.py"
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "tool": "claude",
+  "executable": "claude",
+  "isolation": "full"
+}

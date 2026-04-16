@@ -16,7 +16,7 @@ from click.shell_completion import CompletionItem
 
 import cl9.agent as _agent
 
-from .adapters import get_adapter_for_profile
+from .adapters import LaunchSpec, get_adapter_for_profile
 from .config import config
 from .runtime import (
     materialize_profile_into_runtime,
@@ -615,14 +615,43 @@ def _resolve_enter_target(target: str, force_name: bool, force_path: bool) -> di
     sys.exit(1)
 
 
+def _maybe_nudge_gc(project_root: Path) -> None:
+    """Print a GC reminder if the project hasn't been pruned recently."""
+    from datetime import datetime, timedelta
+
+    try:
+        state = _project_state(project_root)
+        last_gc = state.get_last_gc()
+        overdue = last_gc is None or (datetime.now() - last_gc) > timedelta(days=7)
+        if not overdue:
+            return
+        count = state.count_prunable_sessions()
+        if count == 0:
+            return
+        click.echo(
+            f"[cl9] gc has not run in a while. {count} stale session(s) waiting for removal."
+            " Run: cl9 session prune",
+            err=True,
+        )
+    except Exception:
+        pass  # Never block the user because of a nudge failure
+
+
 @click.group()
 @click.version_option()
-def main():
+@click.pass_context
+def main(ctx):
     """cl9 - Opinionated LLM session manager.
 
     Manage AI-assisted work across isolated project contexts.
     """
-    pass
+    # Nudge the user to run GC if we're inside a project and pruning is overdue.
+    if ctx.invoked_subcommand not in ("project", "man"):
+        try:
+            project_root = _current_project_path()
+            _maybe_nudge_gc(project_root)
+        except BaseException:
+            pass
 
 
 @main.command()
@@ -917,13 +946,15 @@ def _launch_agent_process(
     session_name: Union[str, None],
     profile: ProfileSpec,
     runtime_dir: Path,
-    cmd: List[str],
+    launch_spec: LaunchSpec,
     launch_cwd: Union[Path, None] = None,
     verbose: bool = False,
 ) -> None:
     """Launch an agent process and update project-local session state."""
     env = os.environ.copy()
     env.update(_agent.env)
+    env.update(launch_spec.env)
+    cmd = launch_spec.command
     # Prepend project bin/ to PATH
     project_bin = str(project_root / "bin")
     env["PATH"] = f"{project_bin}:{env['PATH']}" if env.get("PATH") else project_bin
@@ -1015,7 +1046,7 @@ def agent_spawn(session_name, profile_name, verbose, agent_args):
             pass
         raise
 
-    _launch_agent_process(project_root, session_id, session_name, profile, runtime_dir, launch_spec.command, verbose=verbose)
+    _launch_agent_process(project_root, session_id, session_name, profile, runtime_dir, launch_spec, verbose=verbose)
 
 
 @agent.command("continue")
@@ -1060,7 +1091,7 @@ def agent_continue(target, verbose, agent_args):
 
     _launch_agent_process(
         project_root, session.session_id, session.name, profile, runtime_dir,
-        launch_spec.command, launch_cwd=spawn_cwd, verbose=verbose,
+        launch_spec, launch_cwd=spawn_cwd, verbose=verbose,
     )
 
 
@@ -1113,7 +1144,7 @@ def agent_fork(target, session_name, profile_name, agent_args):
         raise
 
     _launch_agent_process(
-        project_root, child_session_id, session_name, profile, runtime_dir, launch_spec.command
+        project_root, child_session_id, session_name, profile, runtime_dir, launch_spec
     )
 
 
@@ -1468,7 +1499,7 @@ def session_list(verbose):
 
 
 @session.command("prune")
-@click.option("--older-than", default="30d", help="Prune idle sessions older than this age (for example 30d).")
+@click.option("--older-than", default="7d", help="Prune idle sessions older than this age (for example 7d).")
 def session_prune(older_than):
     """Remove old idle sessions from local tracking."""
     value = older_than.strip().lower()
@@ -1476,7 +1507,9 @@ def session_prune(older_than):
         raise click.UsageError("--older-than currently expects a whole number of days, e.g. 30d")
 
     project_root = _current_project_path()
-    pruned = _project_state(project_root).prune_sessions(int(value[:-1]))
+    state = _project_state(project_root)
+    pruned = state.prune_sessions(int(value[:-1]))
+    state.record_gc()
     if pruned == 0:
         click.echo("No sessions pruned.")
         return
