@@ -92,6 +92,14 @@ class ProjectState:
                 WHERE status IN ('starting', 'running')
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cl9_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
             conn.commit()
 
     def reconcile_processes(self) -> None:
@@ -385,7 +393,7 @@ class ProjectState:
 
         remove_runtime(self.project_root, session_id)
 
-    def prune_sessions(self, older_than_days: int = 30) -> int:
+    def prune_sessions(self, older_than_days: int = 7) -> int:
         """Delete old idle sessions from local tracking."""
         self.reconcile_processes()
         cutoff = (datetime.now() - timedelta(days=older_than_days)).isoformat()
@@ -409,6 +417,44 @@ class ProjectState:
             remove_runtime(self.project_root, session_id)
 
         return len(session_ids)
+
+    # ── GC timestamp ─────────────────────────────────────────────────────────
+
+    _GC_INTERVAL_DAYS = 7
+
+    def get_last_gc(self) -> Optional[datetime]:
+        """Return when GC was last run, or None if never."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM cl9_meta WHERE key = 'last_gc_at'"
+            ).fetchone()
+        if row is None:
+            return None
+        return datetime.fromisoformat(row["value"])
+
+    def record_gc(self) -> None:
+        """Stamp the current time as the last GC run."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO cl9_meta (key, value) VALUES ('last_gc_at', ?)",
+                (_now(),),
+            )
+            conn.commit()
+
+    def count_prunable_sessions(self, older_than_days: int = _GC_INTERVAL_DAYS) -> int:
+        """Count idle sessions older than older_than_days without deleting them."""
+        cutoff = (datetime.now() - timedelta(days=older_than_days)).isoformat()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM agent_sessions
+                WHERE status = 'idle'
+                  AND last_used_at < ?
+                """,
+                (cutoff,),
+            ).fetchone()
+        return int(row["n"]) if row else 0
 
     @staticmethod
     def _pid_exists(pid: int) -> bool:

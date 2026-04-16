@@ -409,7 +409,35 @@ class CliTests(unittest.TestCase):
         result = self.runner.invoke(cli_module.main, ["agent", "spawn"])
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Not inside a cl9 project", result.output)
+        self.assertIn("Not in a cl9 project directory", result.output)
+
+    def test_gc_nudge_appears_when_stale_sessions_exist(self):
+        """GC nudge is printed to stderr when sessions are overdue for pruning."""
+        from datetime import datetime, timedelta
+
+        project_dir = self.work_dir / "gc-nudge"
+        project_dir.mkdir()
+        self.runner.invoke(cli_module.main, ["init", str(project_dir), "--type", "minimal"])
+        self._chdir(project_dir)
+
+        # Spawn a session then manually backdate last_used_at so it looks stale
+        with patch.object(cli_module.uuid, "uuid4", return_value=uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")):
+            self._invoke_agent(["agent", "spawn"])
+
+        state_db = project_dir / ".cl9" / "state.db"
+        import sqlite3 as _sqlite3
+        stale_time = (datetime.now() - timedelta(days=10)).isoformat()
+        conn = _sqlite3.connect(str(state_db))
+        conn.execute("UPDATE agent_sessions SET status='idle', last_used_at=? WHERE session_id=?",
+                     (stale_time, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"))
+        conn.commit()
+        conn.close()
+
+        result = self.runner.invoke(cli_module.main, ["session", "list"], catch_exceptions=False)
+
+        # Nudge goes to stderr; CliRunner mixes stderr into output by default
+        self.assertIn("gc has not run in a while", result.output)
+        self.assertIn("1 stale session", result.output)
 
     def test_session_list_shows_project_local_sessions(self):
         project_dir = self.work_dir / "session-list"
